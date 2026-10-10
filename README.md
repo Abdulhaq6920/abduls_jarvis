@@ -37,6 +37,7 @@ Agents never claim work they did not do: with no search connected, SHURI says so
 ```powershell
 python -m venv .venv ; .\.venv\Scripts\Activate.ps1
 pip install -e jarvis-shared -e "jarvis-backend[dev]" -e jarvis-local-agent
+cd jarvis-web ; npm ci ; npm run build ; cd ..   # the dashboard (needs Node 22+)
 python scripts/dev/create_local_env.py         # creates .env files and generates every secret
 python -m jarvis_backend create-admin          # your dashboard login (password prompt is hidden)
 python -m jarvis_backend serve                 # open http://localhost:8077
@@ -50,7 +51,8 @@ with `python -m jarvis_local_agent.credentials set`, copy `jarvis-local-agent/.e
 
 ```
 jarvis-shared/        contracts, command classifier, logging   (used by both sides)
-jarvis-backend/       api/ core/ agents/ auth/ storage/ web/    (+ cache, events, jobs, metrics)
+jarvis-backend/       api/ core/ agents/ auth/ storage/        (+ cache, events, jobs, metrics)
+jarvis-web/           React + TypeScript dashboard (builds into the backend package)
 jarvis-local-agent/   wake word, STT/TTS, overlay, validator, executor, tray
 docker/               Dockerfile, nginx.conf, env.docker.example, wslconfig.example
 docker-compose.yml    production-style stack (+ docker-compose.lowmem.yml for small machines)

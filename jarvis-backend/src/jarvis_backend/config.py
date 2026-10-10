@@ -34,6 +34,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MIN_SECRET_LENGTH = 32
 _PLACEHOLDERS = ("change", "example", "secret", "password", "default", "your-", "xxxx", "todo")
 _PRIVATE_DB_HOSTS = {"localhost", "127.0.0.1", "::1", "db", "postgres"}
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _secrets_dir() -> Optional[str]:
@@ -116,6 +117,27 @@ class Settings(BaseSettings):
     cache_default_ttl: int = 60
     cache_max_local_items: int = 5000
 
+    # --- AI models -----------------------------------------------------------------
+    # Any OpenAI-compatible chat endpoint works. The default is the Hugging Face Inference
+    # Providers router. Empty token (or llm_enabled=false) turns AI off: agents fall back to
+    # their honest rule-based behaviour.
+    llm_enabled: bool = True
+    hf_token: Optional[SecretStr] = None
+    llm_api_key: Optional[SecretStr] = None  # for a non-Hugging-Face endpoint; wins over hf_token
+    llm_base_url: str = "https://router.huggingface.co/v1"
+    # Model roles. A ":fastest" / ":cheapest" / ":<provider>" suffix picks the serving provider.
+    llm_model_fast: str = "openai/gpt-oss-20b:fastest"
+    llm_model_default: str = "openai/gpt-oss-120b:fastest"
+    llm_model_reasoning: str = "openai/gpt-oss-120b:fastest"
+    llm_model_fallback: str = "meta-llama/Llama-3.3-70B-Instruct:fastest"
+    llm_max_tokens: int = 800            # per model call
+    llm_max_steps: int = 5               # tool-calling rounds per agent run
+    llm_delegation_depth: int = 2        # how many agent-to-agent hand-offs are allowed
+    llm_timeout_seconds: float = 40.0    # per model call
+    llm_request_budget_seconds: float = 60.0  # whole user request, all calls
+    llm_max_concurrency: int = 4
+    llm_daily_token_limit: int = 300_000  # soft cap across the day (UTC); 0 = unlimited
+
     # --- scheduler -----------------------------------------------------------------
     # Run the cron scheduler inside the API process. Disable on API replicas and run the
     # dedicated `worker`, otherwise every replica fires every job.
@@ -166,6 +188,15 @@ class Settings(BaseSettings):
         value = getattr(self, name)
         return value.get_secret_value() if value else ""
 
+    @property
+    def llm_key(self) -> str:
+        """The credential sent to the model endpoint (never logged)."""
+        return (self.secret("llm_api_key") or self.secret("hf_token")).strip()
+
+    @property
+    def llm_active(self) -> bool:
+        return self.llm_enabled and bool(self.llm_key)
+
     # ------------------------------------------------------------------ validation
     def findings(self) -> List[Finding]:
         """Every security-relevant problem with the current configuration."""
@@ -211,6 +242,13 @@ class Settings(BaseSettings):
                 warn("redis_tls_off", "Redis connection is not TLS (use rediss://).")
         if self.access_token_minutes > 60:
             warn("access_token_long", "Access tokens longer than 60 minutes weaken revocation.")
+        if self.llm_active:
+            base = urlparse(self.llm_base_url)
+            if base.scheme != "https" and (base.hostname or "") not in _LOOPBACK_HOSTS:
+                err("llm_base_url_insecure",
+                    "JARVIS_LLM_BASE_URL must be https:// (the API key is sent to it).")
+            if self.llm_max_steps < 1 or self.llm_max_tokens < 16:
+                err("llm_limits_invalid", "JARVIS_LLM_MAX_STEPS must be >= 1 and MAX_TOKENS >= 16.")
         return out
 
     @model_validator(mode="after")
@@ -235,6 +273,7 @@ class Settings(BaseSettings):
             "jwt_secret": shown("jwt_secret"), "data_key": shown("data_key"),
             "metrics_token": shown("metrics_token"), "cookie_secure": self.secure_cookies,
             "allowed_hosts": self.host_list,
+            "llm": "on" if self.llm_active else "off",
         }
 
 

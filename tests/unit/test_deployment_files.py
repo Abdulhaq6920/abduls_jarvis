@@ -71,7 +71,10 @@ def test_backend_containers_are_locked_down(name):
 
 def test_dockerfile_is_non_root_multistage_and_pinned():
     text = (ROOT / "docker" / "Dockerfile").read_text()
-    assert text.count("FROM ") == 2 and "USER 10001:10001" in text
+    stages = [ln for ln in text.splitlines() if ln.startswith("FROM ")]
+    # dashboard build (node) -> python build -> runtime; only the last one ships
+    assert [s.rsplit(" AS ", 1)[-1] for s in stages] == ["web", "build", "runtime"]
+    assert "USER 10001:10001" in text.split("AS runtime", 1)[1]
     assert "-c constraints.txt" in text and "|| true" not in text
     assert "COPY .env" not in text and ".env" not in re.findall(r"COPY\s+(\S+)", text)
 

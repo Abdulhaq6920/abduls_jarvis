@@ -31,6 +31,24 @@ jobs:
           # Tests use throwaway secrets generated per run; nothing here is a real credential.
           JARVIS_ENV: dev
 
+  web:
+    name: Dashboard (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run: { working-directory: jarvis-web }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24", cache: npm, cache-dependency-path: jarvis-web/package-lock.json }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Known-vulnerability audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
   audit:
     name: Dependency vulnerabilities
     runs-on: ubuntu-latest

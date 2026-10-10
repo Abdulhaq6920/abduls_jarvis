@@ -13,7 +13,7 @@ export function Card({ title, action, glow = false, className = '', children, ..
     <section className={`card ${glow ? 'card-glow' : ''} ${className}`.trim()} {...rest}>
       {(title || action) && (
         <header className="card-head">
-          {title && <h3>{title}</h3>}
+          {title && <h2>{title}</h2>}
           {action}
         </header>
       )}

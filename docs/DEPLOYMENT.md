@@ -7,6 +7,7 @@ Three ways to run it, from simplest to most production-like. Each is independent
 ```powershell
 python -m venv .venv ; .\.venv\Scripts\Activate.ps1
 pip install -e jarvis-shared -e "jarvis-backend[dev]" -e jarvis-local-agent
+cd jarvis-web ; npm ci ; npm run build ; cd ..   # the dashboard (needs Node 22+)
 python -m jarvis_backend create-admin          # prompts for a password (hidden)
 python -m jarvis_backend serve                 # http://localhost:8077
 ```
