@@ -1,18 +1,20 @@
 # jarvis-shared
 
-Shared Pydantic contracts used across every boundary (local runtime ↔ backend ↔
-dashboard). Keeping them here means both sides agree on the wire format and each
-implementation layer stays replaceable.
+Code used by both the backend and the local agent, so they agree on the wire format and on safety.
 
 | Module | Contents |
-| --- | --- |
-| `agents.py` | `AgentId`, `AgentSpec`, the 10-agent roster + personalities. |
-| `voice.py` | `AgentVoiceProfile`, `VoiceSettings`, distinct synthetic defaults. |
-| `audio.py` | `AudioInput`, `AudioResult`, `Transcript`. |
-| `conversation.py` | `ConversationState` FSM states. |
-| `supervisor.py` | `SupervisorStage` (OBSERVE…REPORT). |
-| `security.py` | `RiskLevel`, `CommandCategory`, `ToolRequest`, `ToolResult`. |
-| `messages.py` | `AssistRequest`, `AssistResponse`, `StageTrace`, `RuntimeStatus`. |
+|---|---|
+| `agents.py` | `AgentId`, `AgentSpec`, the 10-agent roster and personalities |
+| `voice.py` | `AgentVoiceProfile`, `VoiceSettings`, distinct synthetic default voices |
+| `audio.py` | `AudioInput`, `AudioResult`, `Transcript` |
+| `conversation.py` | `ConversationState` |
+| `supervisor.py` | `SupervisorStage` (OBSERVE … REPORT) |
+| `security.py` | `RiskLevel`, `CommandCategory`, `ToolRequest`, `ToolResult` |
+| `messages.py` | `AssistRequest` / `AssistResponse` (with input length limits), `StageTrace` |
+| `commands.py` | `classify_command`: exact-program, allow-listed-flag classification (no shell) |
+| `log.py` | Structured logging, request ids, and secret scrubbing |
 
-Voices are **original synthetic** profiles — never impersonations of real actors or
-copyrighted performances.
+`commands.py` is the single implementation of "is this command safe?". Both sides call it, but each
+applies its own allow-lists on top, so neither trusts the other's verdict.
+
+Voices are original synthetic voices, never imitations of real people.

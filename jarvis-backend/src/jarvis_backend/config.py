@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="JARVIS_", env_file=".env", env_file_encoding="utf-8",
         extra="ignore", secrets_dir=_secrets_dir(),
+        # CRITICAL: without this, a validation failure prints `input_value={...}`, i.e. every
+        # raw setting including passwords and keys, straight into the console and logs.
+        hide_input_in_errors=True,
     )
 
     # --- runtime -------------------------------------------------------------------

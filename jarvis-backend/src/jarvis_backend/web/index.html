@@ -1,17 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#070b14" />
+  <meta name="description" content="JARVIS control center: voice console, agents, memory, approvals and system health." />
   <title>JARVIS</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/ui/css/app.css">
+  <link rel="icon" type="image/svg+xml" href="/ui/favicon.svg" />
+  <!-- Applies the saved theme before first paint. External file: the CSP forbids inline script. -->
+  <script src="/ui/theme-init.js"></script>
+  <script type="module" crossorigin src="/ui/assets/index-Cfoq71pU.js"></script>
+  <link rel="stylesheet" crossorigin href="/ui/assets/index-CXGKQRKE.css">
 </head>
 <body>
-  <!-- Everything inside #root is built by /ui/js/app.js. No inline script or style (CSP). -->
   <div id="root"></div>
   <noscript>JARVIS needs JavaScript enabled.</noscript>
-  <script type="module" src="/ui/js/app.js"></script>
 </body>
 </html>

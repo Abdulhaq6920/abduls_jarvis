@@ -1,0 +1,202 @@
+/* The voice orb: rings + core + waveform. State classes (.orb-listening, ...) drive everything. */
+.orb {
+  --orb-color: var(--accent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 0 6px;
+}
+
+.orb-listening {
+  --orb-color: var(--ok);
+}
+
+.orb-thinking {
+  --orb-color: var(--accent-2);
+}
+
+.orb-speaking {
+  --orb-color: var(--accent);
+}
+
+.orb-paused {
+  --orb-color: var(--warn);
+}
+
+.orb-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 230px;
+  height: 230px;
+}
+
+.orb-core {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 28%, #ffffff 0%, var(--orb-color) 38%, var(--accent-2) 100%);
+  box-shadow: 0 0 60px color-mix(in srgb, var(--orb-color) 65%, transparent), inset 0 -10px 24px rgb(0 0 0 / 0.25);
+  animation: breathe 3.6s ease-in-out infinite;
+  transition: background 0.5s;
+}
+
+.orb-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid var(--orb-color);
+  opacity: 0.4;
+}
+
+.orb-stage .r1 {
+  width: 140px;
+  height: 140px;
+  border-style: dashed;
+  animation: rotate 22s linear infinite;
+}
+
+.orb-stage .r2 {
+  width: 184px;
+  height: 184px;
+  opacity: 0.22;
+  border-left-color: transparent;
+  border-right-color: transparent;
+  animation: rotate 14s linear infinite reverse;
+}
+
+.orb-stage .r3 {
+  width: 228px;
+  height: 228px;
+  opacity: 0.12;
+}
+
+.orb-bars {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+
+.orb-bars i {
+  display: block;
+  width: 4px;
+  height: 8px;
+  border-radius: 4px;
+  background: #fff;
+  animation: wave 0.9s ease-in-out infinite;
+  animation-play-state: paused;
+}
+
+.orb-listening .orb-bars,
+.orb-speaking .orb-bars {
+  opacity: 0.95;
+}
+
+.orb-listening .orb-bars i,
+.orb-speaking .orb-bars i {
+  animation-play-state: running;
+}
+
+.orb-listening .orb-core,
+.orb-speaking .orb-core {
+  animation-duration: 1.4s;
+}
+
+.orb-thinking .r1 {
+  animation-duration: 3s;
+}
+
+.orb-thinking .r2 {
+  animation-duration: 2s;
+}
+
+.orb-thinking .orb-core {
+  animation: breathe 1s ease-in-out infinite;
+}
+
+.orb-paused .orb-core {
+  animation: none;
+  filter: saturate(0.5);
+}
+
+.orb-listening .r3,
+.orb-speaking .r3 {
+  animation: ripple 2.2s ease-out infinite;
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes wave {
+  0%,
+  100% {
+    height: 8px;
+  }
+  50% {
+    height: 36px;
+  }
+}
+
+@keyframes ripple {
+  from {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1.12);
+    opacity: 0;
+  }
+}
+
+.orb-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.orb-copy strong {
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+}
+
+.orb-copy span {
+  color: var(--muted);
+}
+
+@media (max-width: 520px) {
+  .orb-stage {
+    width: 190px;
+    height: 190px;
+  }
+
+  .orb-stage .r3 {
+    width: 188px;
+    height: 188px;
+  }
+
+  .orb-stage .r2 {
+    width: 154px;
+    height: 154px;
+  }
+
+  .orb-stage .r1 {
+    width: 120px;
+    height: 120px;
+  }
+
+  .orb-core {
+    width: 80px;
+    height: 80px;
+  }
+}

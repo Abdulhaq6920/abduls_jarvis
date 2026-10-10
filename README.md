@@ -37,6 +37,7 @@ Agents never claim work they did not do: with no search connected, SHURI says so
 ```powershell
 python -m venv .venv ; .\.venv\Scripts\Activate.ps1
 pip install -e jarvis-shared -e "jarvis-backend[dev]" -e jarvis-local-agent
+python scripts/dev/create_local_env.py         # creates .env files and generates every secret
 python -m jarvis_backend create-admin          # your dashboard login (password prompt is hidden)
 python -m jarvis_backend serve                 # open http://localhost:8077
 ```
@@ -48,13 +49,18 @@ with `python -m jarvis_local_agent.credentials set`, copy `jarvis-local-agent/.e
 ## Layout
 
 ```
-jarvis-shared/      contracts, command classifier, logging   (used by both sides)
-jarvis-backend/     api/ core/ agents/ auth/ storage/ web/    (+ cache, events, jobs, metrics)
-jarvis-local-agent/ wake word, STT/TTS, overlay, validator, executor, tray
-docker/ docker-compose.yml   production-style stack
-docs/   SECURITY.md  DEPLOYMENT.md
-tests/  unit/ integration/   (210 tests, incl. real PostgreSQL)
-scripts/ ui_smoke.py (real-browser check), make_docker_secrets.py
+jarvis-shared/        contracts, command classifier, logging   (used by both sides)
+jarvis-backend/       api/ core/ agents/ auth/ storage/ web/    (+ cache, events, jobs, metrics)
+jarvis-local-agent/   wake word, STT/TTS, overlay, validator, executor, tray
+docker/               Dockerfile, nginx.conf, env.docker.example, wslconfig.example
+docker-compose.yml    production-style stack (+ docker-compose.lowmem.yml for small machines)
+docs/                 SECURITY.md  DEPLOYMENT.md  DOCKER_WINDOWS.md  PROVIDERS.md
+tests/                unit/ integration/   (213 tests, incl. real PostgreSQL)
+scripts/
+  dev/                create_local_env.py, ui_smoke.py (real-browser check), demo seed/server
+  docker/             dc.ps1, docker_preflight.ps1, make_docker_secrets.py
+  security/           scan_for_secrets.py, install_git_hooks.ps1, git-hooks/
+  manual/             mic_check.py, overlay_preview.py (need real hardware; not run by pytest)
 ```
 
 ## Configuration and secrets

@@ -23,7 +23,7 @@ def _split(value: object) -> object:
 
 class RuntimeConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="JARVIS_", env_file=".env", env_file_encoding="utf-8",
-                                      extra="ignore")
+                                      extra="ignore", hide_input_in_errors=True)  # never echo secrets in errors
 
     # --- backend + identity ----------------------------------------------------------
     backend_url: str = "http://127.0.0.1:8077"

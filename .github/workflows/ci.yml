@@ -24,7 +24,7 @@ jobs:
           pip install -c constraints.txt -e jarvis-shared "./jarvis-backend[postgres,dev]" -e jarvis-local-agent
           pip install pytest pytest-asyncio fakeredis pyyaml playwright
       - name: Lint
-        run: ruff check jarvis-shared jarvis-backend jarvis-local-agent tests
+        run: ruff check jarvis-shared jarvis-backend jarvis-local-agent tests scripts
       - name: Tests (includes real PostgreSQL via pgserver)
         run: pytest tests/unit tests/integration -q
         env:

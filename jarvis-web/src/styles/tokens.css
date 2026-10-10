@@ -1,0 +1,74 @@
+/* Design tokens. Everything visual hangs off these variables, so a theme is just a new set. */
+:root {
+  color-scheme: dark;
+
+  --font-sans: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Space Grotesk Variable', 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  --bg: #070b14;
+  --bg-2: #0b1322;
+  --surface: rgb(16 24 40 / 0.62);
+  --surface-2: rgb(22 32 52 / 0.7);
+  --surface-solid: #0f1727;
+  --input-bg: rgb(7 12 22 / 0.7);
+  --line: rgb(148 175 215 / 0.13);
+  --line-strong: rgb(148 175 215 / 0.28);
+
+  --text: #e8effb;
+  --muted: #9aabc4;
+  --faint: #667796;
+
+  --accent: #36c6ff;
+  --accent-2: #7c6cff;
+  --accent-3: #ff7ad9;
+  --accent-ink: #04202d;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #fb7185;
+  --info: #60a5fa;
+
+  --glow: 0 0 40px rgb(54 198 255 / 0.28);
+  --shadow: 0 10px 40px rgb(0 0 0 / 0.35);
+  --radius: 18px;
+  --radius-sm: 12px;
+
+  --aurora-1: rgb(54 198 255 / 0.2);
+  --aurora-2: rgb(124 108 255 / 0.22);
+  --aurora-3: rgb(255 122 217 / 0.1);
+
+  --sidebar: 252px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f7fc;
+  --bg-2: #eaf0fa;
+  --surface: rgb(255 255 255 / 0.74);
+  --surface-2: rgb(255 255 255 / 0.9);
+  --surface-solid: #ffffff;
+  --input-bg: rgb(255 255 255 / 0.9);
+  --line: rgb(30 55 100 / 0.12);
+  --line-strong: rgb(30 55 100 / 0.26);
+
+  --text: #0f1b33;
+  --muted: #50617f;
+  --faint: #7d8cab;
+
+  --accent: #0a8fd6;
+  --accent-2: #5b4be0;
+  --accent-3: #d63fa8;
+  --accent-ink: #ffffff;
+  --ok: #0f9d6b;
+  --warn: #b7791f;
+  --danger: #d6334d;
+  --info: #2563eb;
+
+  --glow: 0 0 40px rgb(10 143 214 / 0.2);
+  --shadow: 0 10px 30px rgb(30 55 100 / 0.12);
+
+  --aurora-1: rgb(54 198 255 / 0.28);
+  --aurora-2: rgb(124 108 255 / 0.2);
+  --aurora-3: rgb(255 122 217 / 0.14);
+}

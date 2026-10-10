@@ -1,0 +1,15 @@
+#!/bin/sh
+# Blocks any commit that would publish a secret. Installed by scripts/security/install_git_hooks.ps1.
+# Bypass only deliberately, and only if you are sure:  git commit --no-verify
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+PY=".venv/Scripts/python.exe"
+[ -x "$PY" ] || PY=".venv/bin/python"
+[ -x "$PY" ] || PY="python"
+
+if ! "$PY" scripts/security/scan_for_secrets.py; then
+  echo ""
+  echo "COMMIT BLOCKED: a secret was found in the files above (values are never printed)."
+  echo "Remove it, add the file to .gitignore, and rotate the secret if it was ever pushed."
+  exit 1
+fi

@@ -105,8 +105,6 @@ _SECRET_KEYS = {
     "JARVIS_JWT_SECRET": lambda: secrets.token_urlsafe(48),
     "JARVIS_DATA_KEY": lambda: __import__("cryptography.fernet", fromlist=["Fernet"]).Fernet.generate_key().decode(),
     "JARVIS_METRICS_TOKEN": lambda: secrets.token_urlsafe(32),
-    "POSTGRES_PASSWORD": lambda: secrets.token_urlsafe(24),
-    "REDIS_PASSWORD": lambda: secrets.token_urlsafe(24),
 }
 
 

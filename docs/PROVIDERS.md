@@ -1,73 +1,51 @@
-# Swapping in production providers
+# Swapping components
 
-Every I/O layer is behind an interface, so moving from the dev prototype to real
-engines is configuration + an adapter, never a supervisor rewrite.
+Wake word, speech-to-text, text-to-speech, the router and the agents each sit behind a small
+interface, so replacing one is an adapter, not a rewrite of the supervisor.
 
-## Install the optional extras
+## What `jarvis-voice` uses today
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e "jarvis-local-agent[voice,tray]"
-```
+| Layer | Implementation | Where |
+|---|---|---|
+| Wake word | Vosk, restricted grammar, **fully local** | `voice_local.py::VoskWakeWordEngine` |
+| Speech-to-text | Vosk, **fully local** | `voice_local.py::VoskSTTProvider` |
+| Text-to-speech | Windows SAPI, one voice profile per agent | `voice_local.py::SapiTTSProvider` |
 
-## Wake word — `WakeWordEngine`
+`jarvis-voice` (the real microphone launcher) wires these directly. The environment variables
+`JARVIS_WAKE_ENGINE` / `JARVIS_STT_ENGINE` / `JARVIS_TTS_ENGINE` only affect the typed-input
+launcher, `jarvis-local-agent`, which is for development without a microphone.
 
-| Env | Value | Effect |
-| --- | --- | --- |
-| `JARVIS_WAKE_ENGINE` | `dev` (default) | Type-driven, zero deps. |
-| `JARVIS_WAKE_ENGINE` | `porcupine` | Local Picovoice Porcupine inference. |
-| `JARVIS_PICOVOICE_KEY` | your key | Required for Porcupine. |
-| `JARVIS_WAKE_SENSITIVITY` | `0.0`–`1.0` | False-positive vs. miss tradeoff. |
+## Replacing a layer
 
-Audio stays local until the wake word fires. To add another engine, implement the
-`WakeWordEngine` Protocol in `wake.py` and extend `build_wake_engine`.
+* **Wake word** (e.g. Picovoice Porcupine): implement `WakeWordEngine` from `wake.py`
+  (`start / pause / resume / stop / paused / name`). A Porcupine adapter already exists there
+  and reads `JARVIS_PICOVOICE_KEY`; it needs `pvporcupine` and a key from Picovoice.
+* **Speech-to-text** (e.g. Whisper): implement `STTProvider.transcribe`. A `faster-whisper`
+  adapter exists in `stt.py`; install with `pip install -e "jarvis-local-agent[voice-alt]"`.
+* **Text-to-speech** (Azure, ElevenLabs, Piper): implement `synthesize` / `speak` / `stop` and map
+  `AgentVoiceProfile.voice_id` to the engine's voice. Use original synthetic voices; never imitate
+  a real person or a copyrighted performance.
+* **Router** (e.g. a LangGraph or LLM router): implement `Router.route` from `core/router.py`
+  and pass it to `Supervisor(router=...)` in `container.py`.
+* **A new agent**: add an `AgentSpec` in `jarvis_shared/agents.py` and a default voice in
+  `jarvis_shared/voice.py`, then a class in `jarvis_backend/agents/runtime.py` (unlisted agents fall
+  back to `UnconnectedAgent`, which says honestly that it has no model).
 
-## Speech-to-text — `STTProvider`
+## Not connected yet
 
-| Env | Value | Effect |
-| --- | --- | --- |
-| `JARVIS_STT_ENGINE` | `dev` (default) | Text source, zero deps. |
-| `JARVIS_STT_ENGINE` | `whisper` | Local faster-whisper (private, low latency). |
+These are deliberately stubs that say so out loud rather than pretend:
 
-Add a cloud STT by implementing `STTProvider.transcribe` and extending `build_stt`.
+| Capability | Agent | What is needed |
+|---|---|---|
+| Web research | SHURI | A search API and an LLM to synthesise results |
+| Gmail / Calendar | NATASHA | Google OAuth client (minimal scopes); send/modify must keep going through approval |
+| Reasoning, planning, analysis | VISION, DR. STRANGE, QUICKSILVER, NICK FURY | An LLM provider and API key |
+| GUI automation | FRIDAY | Keyboard/mouse/screen tools, always behind approval |
 
-## Text-to-speech — `TTSProvider`
+Secrets for these belong in `.env` or `./secrets/`, never in code or chat. Add the matching field
+to `jarvis_backend/config.py` as a `SecretStr` so it is redacted everywhere.
 
-| Env | Value | Effect |
-| --- | --- | --- |
-| `JARVIS_TTS_ENGINE` | `dev` (default) | Prints spoken line + voice id; uses SAPI if pyttsx3 present. |
-| `JARVIS_TTS_ENGINE` | `pyttsx3` | Offline Windows SAPI5 voices. |
+## Backend configuration reference
 
-For Azure / ElevenLabs / Piper, implement `synthesize` + `speak` + `stop` and map
-`AgentVoiceProfile.voice_id` to the engine's voice. **Use original synthetic voices;
-never imitate real actors or copyrighted performances.** The agent logic does not
-change.
-
-## LLM / routing — `LLMProvider` + `Router`
-
-- `jarvis_backend/llm.py` ships `EchoLLM`. Implement `LLMProvider.complete` for
-  OpenAI/Anthropic/Ollama and inject it into the agents.
-- `jarvis_backend/router.py` ships `KeywordRouter`. A `LangGraphRouter` implementing
-  the `Router` Protocol can replace it; the supervisor is agnostic.
-
-## Scheduler
-
-`jarvis_backend/scheduler.py` uses APScheduler in-process. For durability across
-restarts, point it at a persistent job store or move jobs to a dedicated worker
-(Celery/RQ). Jobs already run independently of FastAPI requests.
-
-## Google integrations (OAuth)
-
-The Gmail/Calendar tool executors in `jarvis_local_agent/tools.py::_integration` are
-seams. Wire Google OAuth there; reads stay SAFE, sends/mutations are RESTRICTED and
-route through the approval queue (as Test 5 demonstrates).
-
-## Config reference (env vars)
-
-```
-JARVIS_BACKEND_URL        default http://127.0.0.1:8077
-JARVIS_BACKEND_HOST/PORT  backend bind (default 127.0.0.1:8077)
-JARVIS_WAKE_PHRASE        default "hey jarvis"
-JARVIS_CONV_TIMEOUT       active-conversation timeout seconds (default 12)
-JARVIS_ALLOWED_PATHS      ; or , separated allow-list for filesystem/terminal
-JARVIS_ALLOWED_APPS       , separated app allow-list for application tool
-```
+See `.env.example` (every setting is documented there) and `python -m jarvis_backend check-config`.
+Local agent settings are in `jarvis-local-agent/.env.example`.

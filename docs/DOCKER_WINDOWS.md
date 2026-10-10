@@ -1,7 +1,7 @@
 # Docker on Windows: step by step
 
 This gets the full JARVIS stack (API, worker, PostgreSQL, Redis, nginx) running on a Windows 11
-laptop. Run `scripts\docker_preflight.ps1` after any step to see what is left; it only reads.
+laptop. Run `scripts\docker\docker_preflight.ps1` after any step to see what is left; it only reads.
 
 > **Your machine has 3.8 GB RAM.** Docker Desktop plus a database is tight but workable if you
 > follow step 3 (cap Docker's memory) and use the low-memory profile (the default in `dc.ps1`).
@@ -54,7 +54,7 @@ Check: `docker info --format "{{.MemTotal}}"` shows roughly 2 GB (about 20000000
 ## Step 4: Verify everything so far
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\docker_preflight.ps1
+powershell -ExecutionPolicy Bypass -File scripts\docker\docker_preflight.ps1
 ```
 
 All the Docker lines should be `[ OK ]`, including "can pull and run a container".
@@ -64,7 +64,7 @@ All the Docker lines should be `[ OK ]`, including "can pull and run a container
 Already done if you ran these once (safe to re-run; they never overwrite):
 
 ```powershell
-python scripts\make_docker_secrets.py
+python scripts\docker\make_docker_secrets.py
 copy docker\env.docker.example docker\.env.docker
 ```
 
@@ -76,7 +76,7 @@ copy docker\env.docker.example docker\.env.docker
 ## Step 6: Build and start
 
 ```powershell
-scripts\dc.ps1 up -d --build
+scripts\docker\dc.ps1 up -d --build
 ```
 
 The first run downloads about 500 MB of images and builds ours: **3 to 8 minutes**. Later starts
@@ -85,7 +85,7 @@ take seconds. `dc.ps1` is a thin wrapper that adds the env file and the low-memo
 ## Step 7: Check it is healthy
 
 ```powershell
-scripts\dc.ps1 ps
+scripts\docker\dc.ps1 ps
 ```
 
 Expected: `postgres`, `redis`, `api`, `nginx` are **running** (and `healthy` where shown), `worker`
@@ -100,7 +100,7 @@ curl http://localhost:8080/readyz       # {"ready":true,"database":true,"redis":
 ## Step 8: Create your login and open the dashboard
 
 ```powershell
-scripts\dc.ps1 run --rm api create-admin
+scripts\docker\dc.ps1 run --rm api create-admin
 ```
 
 Type a username, then a password (12+ characters; typing is hidden). Then open
@@ -111,13 +111,13 @@ Cache `Redis OK`, and `CHAIN VERIFIED`.
 
 | Do this | Command |
 |---|---|
-| See status | `scripts\dc.ps1 ps` |
-| Follow logs | `scripts\dc.ps1 logs -f api worker` |
-| Stop (keeps your data) | `scripts\dc.ps1 down` |
-| Start again | `scripts\dc.ps1 up -d` |
-| Rebuild after code changes | `scripts\dc.ps1 up -d --build` |
-| **Delete all data** (database too) | `scripts\dc.ps1 down -v` |
-| Bigger machine, 2 API replicas | `scripts\dc.ps1 -Full up -d --build` |
+| See status | `scripts\docker\dc.ps1 ps` |
+| Follow logs | `scripts\docker\dc.ps1 logs -f api worker` |
+| Stop (keeps your data) | `scripts\docker\dc.ps1 down` |
+| Start again | `scripts\docker\dc.ps1 up -d` |
+| Rebuild after code changes | `scripts\docker\dc.ps1 up -d --build` |
+| **Delete all data** (database too) | `scripts\docker\dc.ps1 down -v` |
+| Bigger machine, 2 API replicas | `scripts\docker\dc.ps1 -Full up -d --build` |
 
 ## Troubleshooting
 
@@ -126,7 +126,7 @@ Cache `Redis OK`, and `CHAIN VERIFIED`.
 | `wsl --install` says it needs virtualization | Enable it in BIOS/UEFI (yours reports it is already on) |
 | Docker Desktop stuck on "Starting" | `wsl --shutdown`, reopen Docker Desktop; make sure step 1 was followed by a restart |
 | Whole PC slow / out of memory | Step 3 not applied; run `wsl --shutdown` and reopen. Close other apps while building |
-| `migrate` keeps restarting or `api` never starts | `scripts\dc.ps1 logs migrate`. A password error means you regenerated `secrets\` after the database was first created; the volume still holds the old password. Either restore the old secrets or `scripts\dc.ps1 down -v` to start fresh |
+| `migrate` keeps restarting or `api` never starts | `scripts\docker\dc.ps1 logs migrate`. A password error means you regenerated `secrets\` after the database was first created; the volume still holds the old password. Either restore the old secrets or `scripts\docker\dc.ps1 down -v` to start fresh |
 | `Missing docker\.env.docker` | `copy docker\env.docker.example docker\.env.docker` |
 | Config error mentioning `https` / `JARVIS_PUBLIC_ORIGIN` | You set `JARVIS_ENV=prod` without TLS. For a laptop test use `JARVIS_ENV=dev` |
 | Port 8080 already in use | Change `JARVIS_HTTP_PORT` and `JARVIS_PUBLIC_ORIGIN` in `docker\.env.docker`, then `up -d` |

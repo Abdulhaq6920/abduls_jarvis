@@ -28,6 +28,21 @@ def settings(tmp_path) -> Settings:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_environment(tmp_path, monkeypatch):
+    """Tests must never depend on the developer's own configuration.
+
+    Settings read JARVIS_* variables and a `.env` from the working directory. Without this, a
+    developer who has a real `.env` (with real secrets) gets different results from CI, and a
+    test that expects 'no secrets configured' passes or fails depending on whose machine it is.
+    """
+    import os
+
+    for name in [n for n in os.environ if n.startswith("JARVIS_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)  # a directory with no .env in it
+
+
+@pytest.fixture(autouse=True)
 def _reset_cipher():
     yield
     set_cipher(FieldCipher([]))

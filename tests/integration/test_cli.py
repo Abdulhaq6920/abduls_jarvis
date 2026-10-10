@@ -75,10 +75,36 @@ def test_check_config_fails_loudly_on_unsafe_production(workdir, monkeypatch, ca
     get_settings.cache_clear()
 
 
+def test_a_failed_startup_never_prints_any_secret_value(workdir, monkeypatch, capsys):
+    """Regression: pydantic's default error echoed the raw input of EVERY setting, so a bad config
+    wrote the database password and keys to the console and logs."""
+    marks = {
+        "JARVIS_JWT_SECRET": "weak-jwt-MARK1",
+        "JARVIS_DATA_KEY": "not-a-fernet-key-MARK2",
+        "JARVIS_DATABASE_URL": "postgresql+asyncpg://jarvis:MARK3-example@db.internal:5432/jarvis",
+        "JARVIS_REDIS_URL": "redis://:MARK4-example@cache.internal:6379/0",
+        "JARVIS_METRICS_TOKEN": "metrics-MARK5",
+    }
+    monkeypatch.setenv("JARVIS_ENV", "prod")
+    for name, value in marks.items():
+        monkeypatch.setenv(name, value)
+    from jarvis_backend.config import Settings, get_settings
+    get_settings.cache_clear()
+    assert main(["check-config"]) == 1
+    printed = capsys.readouterr().out
+    for mark in ("MARK1", "MARK2", "MARK3", "MARK4", "MARK5"):
+        assert mark not in printed, f"{mark} leaked into check-config output"
+    with pytest.raises(Exception) as raised:   # the exception itself (what a traceback would show)
+        Settings()
+    for mark in ("MARK1", "MARK2", "MARK3", "MARK4", "MARK5"):
+        assert mark not in str(raised.value) and mark not in repr(raised.value)
+    get_settings.cache_clear()
+
+
 def test_env_template_has_no_real_secrets():
     """The committed example must stay a template: every secret field is empty."""
     values = env_values(ROOT / ".env.example")
-    for key in ("JARVIS_JWT_SECRET", "JARVIS_DATA_KEY", "JARVIS_METRICS_TOKEN", "POSTGRES_PASSWORD", "REDIS_PASSWORD"):
+    for key in ("JARVIS_JWT_SECRET", "JARVIS_DATA_KEY", "JARVIS_METRICS_TOKEN"):
         assert values[key] == "", f"{key} must be empty in .env.example"
     assert not re.search(r"eyJ[A-Za-z0-9_-]{10,}", (ROOT / ".env.example").read_text())
 

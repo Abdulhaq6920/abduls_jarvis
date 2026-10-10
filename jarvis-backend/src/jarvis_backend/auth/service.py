@@ -169,7 +169,7 @@ class AuthService:
         try:
             check_policy(new, user.username)
         except WeakPassword as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+            raise HTTPException(422, str(exc)) from None
         await self.users.set_password(user.id, await hash_password(new))
         await self.logout_everywhere(user.id, reason="password_changed")
         await self._audit.record("password_changed", user_id=user.id)

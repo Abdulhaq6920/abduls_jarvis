@@ -112,5 +112,32 @@ def test_lowmem_profile_only_shrinks_resources_and_never_weakens_security():
 
 
 def test_backend_package_ships_the_dashboard():
-    assert (ROOT / "jarvis-backend/src/jarvis_backend/web/index.html").exists()
+    """The React app is built into the backend package; the build output is generated, not committed."""
+    assert (ROOT / "jarvis-web/index.html").exists() and (ROOT / "jarvis-web/package-lock.json").exists()
+    vite = (ROOT / "jarvis-web/vite.config.ts").read_text()
+    assert "../jarvis-backend/src/jarvis_backend/web" in vite and "base: '/ui/'" in vite
+    assert "assetsInlineLimit: 0" in vite  # the CSP forbids data: URLs for fonts/assets
     assert "web/**/*" in (ROOT / "jarvis-backend/pyproject.toml").read_text()
+    assert "jarvis-backend/src/jarvis_backend/web/" in (ROOT / ".gitignore").read_text()
+
+
+def test_image_builds_the_dashboard_with_node_and_ships_none_of_it():
+    dockerfile = (ROOT / "docker/Dockerfile").read_text()
+    stages = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
+    assert any(" AS web" in s and "node:" in s for s in stages)
+    runtime = dockerfile.split("AS runtime", 1)[1]
+    assert "node" not in runtime.lower().replace("nologin", "")  # Node never reaches the runtime image
+    assert "npm ci" in dockerfile  # reproducible: installs exactly what the lockfile pins
+
+
+def test_dashboard_never_loosens_the_csp_or_injects_html():
+    """The strict CSP (no inline script/style) is the XSS backstop; the source must not fight it."""
+    index = (ROOT / "jarvis-web/index.html").read_text()
+    assert "<style" not in index and "style=" not in index
+    assert not [line for line in index.splitlines() if "<script" in line and "src=" not in line]
+    sources = [p for p in (ROOT / "jarvis-web/src").rglob("*") if p.suffix in {".ts", ".tsx"} and ".test." not in p.name]
+    assert sources, "dashboard sources missing"
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        assert "dangerouslySetInnerHTML" not in text and ".innerHTML" not in text, path
+        assert "localStorage.setItem('jarvis-token" not in text, path

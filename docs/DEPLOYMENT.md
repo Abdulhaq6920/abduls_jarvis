@@ -36,17 +36,19 @@ Both `postgres://` and `postgresql://` forms are accepted and rewritten for the 
 > Not yet run end to end: Docker was unavailable where this was written. The files are checked
 > by `tests/unit/test_deployment_files.py`, but expect to fix small things on first `up`.
 
+Windows laptop walkthrough: [`DOCKER_WINDOWS.md`](DOCKER_WINDOWS.md). In short:
+
 ```powershell
-python scripts/make_docker_secrets.py        # creates ./secrets/* (git-ignored), prints no values
-copy .env.example .env                        # then set the three values below
-#   JARVIS_ALLOWED_HOSTS=jarvis.example.com
-#   JARVIS_PUBLIC_ORIGIN=https://jarvis.example.com
-#   JARVIS_HTTP_PORT=8080
-docker compose up -d --build
-docker compose run --rm api create-admin     # first dashboard user
-docker compose up -d --scale api=3           # scale the API
-docker compose logs -f api worker
+python scripts/docker/make_docker_secrets.py                 # ./secrets/* (git-ignored), prints no values
+copy docker\env.docker.example docker\.env.docker     # non-secret settings; edit for your host
+scripts\docker\dc.ps1 up -d --build                          # low-memory profile by default
+scripts\docker\dc.ps1 run --rm api create-admin              # first dashboard user
+scripts\docker\dc.ps1 -Full up -d --scale api=3              # big machine: scale the API
+scripts\docker\dc.ps1 logs -f api worker
 ```
+
+For a real server set, in `docker\.env.docker`: `JARVIS_ENV=prod`,
+`JARVIS_ALLOWED_HOSTS=jarvis.example.com` and `JARVIS_PUBLIC_ORIGIN=https://jarvis.example.com`.
 
 Scaling notes:
 
@@ -94,5 +96,5 @@ Series worth alerting on: `jarvis_cache_fallback_active == 1` (Redis down),
 
 ```powershell
 pytest tests/unit tests/integration          # ~200 tests; includes real PostgreSQL via pgserver
-python scripts/ui_smoke.py http://localhost:8077   # real-browser check of the dashboard
+python scripts/dev/ui_smoke.py http://localhost:8077   # real-browser check of the dashboard
 ```

@@ -2,11 +2,11 @@
 #
 #   Full walkthrough for Windows: docs/DOCKER_WINDOWS.md
 #
-#   1.  python scripts/make_docker_secrets.py          (writes ./secrets/*, prints no values)
+#   1.  python scripts/docker/make_docker_secrets.py          (writes ./secrets/*, prints no values)
 #   2.  copy docker/env.docker.example docker/.env.docker   and edit it
-#   3.  scripts\dc.ps1 up -d --build                    (wrapper that adds --env-file and the profile)
-#   4.  scripts\dc.ps1 run --rm api create-admin        (first dashboard user)
-#   5.  scale the API (full profile only):  scripts\dc.ps1 -Full up -d --scale api=3
+#   3.  scripts\docker\dc.ps1 up -d --build                    (wrapper that adds --env-file and the profile)
+#   4.  scripts\docker\dc.ps1 run --rm api create-admin        (first dashboard user)
+#   5.  scale the API (full profile only):  scripts\docker\dc.ps1 -Full up -d --scale api=3
 #
 # Topology
 #

@@ -21,3 +21,14 @@ tests
 docs
 ui-shots
 jarvis-local-agent
+
+# Build/dev artifacts and files the backend image never needs
+**/*.egg-info
+scripts
+.github
+docker-compose*.yml
+README.md
+
+# Dashboard: sources are built inside the image (see docker/Dockerfile); local output is not reused
+**/node_modules
+jarvis-backend/src/jarvis_backend/web

@@ -97,6 +97,7 @@ class JarvisRuntime:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._backend_online = False
         self._background: list[asyncio.Task] = []
+        self._beat_tasks: set[asyncio.Future] = set()
         self._beat_pending = False
 
     # -- lifecycle --
@@ -301,7 +302,11 @@ class JarvisRuntime:
             async def once() -> None:
                 self._beat_pending = False
                 await self._beat()
-            asyncio.ensure_future(once())
+            # Keep a strong reference: the loop only holds weak refs, so an unreferenced task
+            # can be garbage-collected mid-flight and `_beat_pending` would never reset.
+            task = asyncio.ensure_future(once())
+            self._beat_tasks.add(task)
+            task.add_done_callback(self._beat_tasks.discard)
 
         loop.call_soon_threadsafe(schedule)
 

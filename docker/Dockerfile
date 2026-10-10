@@ -4,13 +4,24 @@
 # Build from the repository root:   docker build -f docker/Dockerfile -t jarvis-backend .
 #
 # Security properties of the result:
-#   * multi-stage: compilers and pip caches never reach the runtime image
+#   * multi-stage: Node, compilers and pip caches never reach the runtime image
 #   * runs as an unprivileged user (uid 10001), no shell login, no home directory writes
 #   * dependencies installed from the pinned constraints file (reproducible, auditable)
 #   * no secrets are copied in (.dockerignore excludes .env); they arrive at runtime
 #   * the container filesystem can be mounted read-only (compose does this)
 
 ARG PYTHON_VERSION=3.11
+ARG NODE_VERSION=24
+
+# ------------------------------------------------------------ dashboard build stage
+# Node is used only here. The runtime image contains the compiled static files, never Node.
+FROM node:${NODE_VERSION}-alpine AS web
+WORKDIR /src/jarvis-web
+COPY jarvis-web/package.json jarvis-web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY jarvis-web ./
+# vite.config.ts writes to ../jarvis-backend/src/jarvis_backend/web
+RUN npm run build
 
 # ---------------------------------------------------------------- build stage
 FROM python:${PYTHON_VERSION}-slim-bookworm AS build
@@ -19,6 +30,7 @@ WORKDIR /src
 COPY constraints.txt ./
 COPY jarvis-shared ./jarvis-shared
 COPY jarvis-backend ./jarvis-backend
+COPY --from=web /src/jarvis-backend/src/jarvis_backend/web ./jarvis-backend/src/jarvis_backend/web
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install -c constraints.txt ./jarvis-shared "./jarvis-backend[postgres]"
 
