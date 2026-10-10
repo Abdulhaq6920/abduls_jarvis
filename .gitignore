@@ -1,0 +1,33 @@
+# --- secrets: NEVER commit these ---------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+*_secrets.json
+dev_secrets.json
+admin_token
+agent_token
+
+# --- python / tooling --------------------------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- runtime data (conversations, audit, databases, logs) --------------------------
+.jarvis/
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.log
+ui-shots/
+backups/

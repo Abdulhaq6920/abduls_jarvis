@@ -1,0 +1,292 @@
+"""Backend configuration and secret handling.
+
+Where values come from (highest priority first):
+
+1. real environment variables (``JARVIS_*``) -- what Docker / your host sets
+2. files in a secrets directory (``/run/secrets`` or ``JARVIS_SECRETS_DIR``) -- the
+   Docker/Kubernetes secrets mechanism: one file per setting, file name = variable name
+3. a local ``.env`` file (development only; it is git-ignored and excluded from images)
+
+Secret handling rules enforced here:
+
+* every secret is a ``SecretStr`` -- it prints as ``**********`` in logs, reprs and
+  tracebacks and must be unwrapped deliberately with ``get_secret_value()``;
+* in ``JARVIS_ENV=prod`` the process REFUSES TO START on missing, short, placeholder or
+  structurally unsafe secrets/settings (it lists the problems, never the values);
+* in dev, missing secrets are generated once into the data directory (mode 0600) so the
+  first run works without ceremony, and a posture report flags that they are dev-only.
+"""
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import stat
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import List, Literal, Optional
+from urllib.parse import urlparse
+
+from pydantic import SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+MIN_SECRET_LENGTH = 32
+_PLACEHOLDERS = ("change", "example", "secret", "password", "default", "your-", "xxxx", "todo")
+_PRIVATE_DB_HOSTS = {"localhost", "127.0.0.1", "::1", "db", "postgres"}
+
+
+def _secrets_dir() -> Optional[str]:
+    explicit = os.environ.get("JARVIS_SECRETS_DIR")
+    if explicit:
+        return explicit
+    return "/run/secrets" if Path("/run/secrets").is_dir() else None
+
+
+@dataclass(frozen=True)
+class Finding:
+    level: Literal["error", "warning"]
+    code: str
+    message: str
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="JARVIS_", env_file=".env", env_file_encoding="utf-8",
+        extra="ignore", secrets_dir=_secrets_dir(),
+    )
+
+    # --- runtime -------------------------------------------------------------------
+    env: Literal["dev", "prod"] = "dev"
+    host: str = "127.0.0.1"
+    port: int = 8077
+    data_dir: Path = Path.home() / ".jarvis"
+    version: str = "0.2.0"
+
+    # --- network exposure ----------------------------------------------------------
+    # Comma separated Host headers we answer to (blocks DNS-rebinding attacks).
+    allowed_hosts: str = "localhost,127.0.0.1"
+    # The browser origin of the dashboard, e.g. https://jarvis.example.com. Used to
+    # verify the Origin header on cookie-authenticated requests (CSRF defence).
+    public_origin: str = ""
+    # Number of reverse proxies in front of the API whose X-Forwarded-For we trust (nginx: 1).
+    # 0 means "ignore the header entirely" -- a client can forge it.
+    trusted_proxy_hops: int = 0
+    max_body_bytes: int = 65_536
+    max_ws_connections: int = 200
+    max_ws_per_principal: int = 5
+
+    # --- authentication ------------------------------------------------------------
+    jwt_secret: Optional[SecretStr] = None
+    # Old signing secrets still accepted for VERIFICATION during a rotation.
+    jwt_previous_secrets: Optional[SecretStr] = None
+    jwt_issuer: str = "jarvis"
+    jwt_audience: str = "jarvis-api"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 7
+    device_token_minutes: int = 10
+    cookie_name: str = "jarvis_refresh"
+    cookie_secure: Optional[bool] = None  # default: True in prod, False in dev
+    login_attempts_per_window: int = 5
+    login_window_seconds: int = 900
+    assist_per_minute: int = 60
+
+    # --- data protection -----------------------------------------------------------
+    # Fernet key(s), comma separated, newest first. Encrypts conversations, memories and
+    # approval payloads at rest. Generate with `python -m jarvis_backend init-secrets`.
+    data_key: Optional[SecretStr] = None
+    turn_retention_days: int = 30
+    history_turns: int = 6
+    approval_ttl_seconds: int = 900
+
+    # --- storage -------------------------------------------------------------------
+    # Empty => SQLite file in data_dir. Production: postgresql+asyncpg://user:pw@host/db
+    database_url: Optional[SecretStr] = None
+    database_ssl: Literal["disable", "prefer", "require", "verify-ca", "verify-full"] = "prefer"
+    database_ca_file: str = ""
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+
+    # --- redis ---------------------------------------------------------------------
+    # Empty => in-process cache/limiter/bus (single replica only). Use rediss:// for TLS.
+    redis_url: Optional[SecretStr] = None
+    cache_default_ttl: int = 60
+    cache_max_local_items: int = 5000
+
+    # --- scheduler -----------------------------------------------------------------
+    # Run the cron scheduler inside the API process. Disable on API replicas and run the
+    # dedicated `worker`, otherwise every replica fires every job.
+    run_scheduler: bool = True
+    timezone: str = ""
+
+    # --- observability -------------------------------------------------------------
+    log_level: str = "INFO"
+    log_format: Literal["text", "json"] = "text"
+    log_to_file: bool = True
+    metrics_enabled: bool = True
+    # Prometheus scrapes /metrics with `Authorization: Bearer <this>`.
+    metrics_token: Optional[SecretStr] = None
+
+    # ------------------------------------------------------------------ derived values
+    @property
+    def is_prod(self) -> bool:
+        return self.env == "prod"
+
+    @property
+    def host_list(self) -> List[str]:
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
+
+    @property
+    def secure_cookies(self) -> bool:
+        return self.cookie_secure if self.cookie_secure is not None else self.is_prod
+
+    @property
+    def effective_database_url(self) -> str:
+        raw = self.database_url.get_secret_value().strip() if self.database_url else ""
+        if not raw:
+            return f"sqlite+aiosqlite:///{(self.data_dir / 'jarvis.db').as_posix()}"
+        # Be forgiving about what people paste from a provider dashboard.
+        for prefix in ("postgres://", "postgresql://"):
+            if raw.startswith(prefix):
+                return "postgresql+asyncpg://" + raw[len(prefix):]
+        return raw
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.effective_database_url.startswith("sqlite")
+
+    @property
+    def redis_url_value(self) -> str:
+        return self.redis_url.get_secret_value().strip() if self.redis_url else ""
+
+    def secret(self, name: str) -> str:
+        value = getattr(self, name)
+        return value.get_secret_value() if value else ""
+
+    # ------------------------------------------------------------------ validation
+    def findings(self) -> List[Finding]:
+        """Every security-relevant problem with the current configuration."""
+        out: List[Finding] = []
+
+        def err(code: str, msg: str) -> None:
+            out.append(Finding("error" if self.is_prod else "warning", code, msg))
+
+        def warn(code: str, msg: str) -> None:
+            out.append(Finding("warning", code, msg))
+
+        jwt = self.secret("jwt_secret")
+        if len(jwt) < MIN_SECRET_LENGTH:
+            err("jwt_secret_weak", f"JARVIS_JWT_SECRET must be at least {MIN_SECRET_LENGTH} characters.")
+        elif _looks_like_placeholder(jwt):
+            err("jwt_secret_placeholder", "JARVIS_JWT_SECRET looks like a placeholder value.")
+        if not self.secret("data_key"):
+            err("data_key_missing", "JARVIS_DATA_KEY is not set: data at rest is NOT encrypted.")
+        if self.is_prod:
+            if self.is_sqlite:
+                err("sqlite_in_prod", "Production should use PostgreSQL (JARVIS_DATABASE_URL).")
+            if not self.redis_url_value:
+                err("redis_missing", "Production needs Redis (JARVIS_REDIS_URL) for revocation, "
+                                     "rate limiting and cross-replica events.")
+            if "*" in self.host_list or not self.host_list:
+                err("hosts_open", "JARVIS_ALLOWED_HOSTS must list your real host names, not '*'.")
+            if not self.public_origin.startswith("https://"):
+                err("origin_not_https", "JARVIS_PUBLIC_ORIGIN must be an https:// origin.")
+            if not self.secure_cookies:
+                err("cookie_insecure", "Cookies must be Secure in production.")
+            if self.metrics_enabled and len(self.secret("metrics_token")) < 24:
+                err("metrics_token_weak", "Set JARVIS_METRICS_TOKEN (>= 24 chars) or disable metrics.")
+        if not self.is_sqlite and self.database_ssl in ("disable", "prefer"):
+            host = urlparse(self.effective_database_url.replace("+asyncpg", "")).hostname or ""
+            if self.database_ssl == "disable" and host not in _PRIVATE_DB_HOSTS:
+                warn("db_tls_off", "Database traffic to a remote host is not encrypted (database_ssl=disable).")
+            elif self.database_ssl == "prefer" and host not in _PRIVATE_DB_HOSTS:
+                warn("db_tls_optional", "database_ssl=prefer can silently fall back to plaintext; use "
+                                        "require or verify-full.")
+        if self.redis_url_value.startswith("redis://") and self.is_prod:
+            host = urlparse(self.redis_url_value).hostname or ""
+            if host not in _PRIVATE_DB_HOSTS:
+                warn("redis_tls_off", "Redis connection is not TLS (use rediss://).")
+        if self.access_token_minutes > 60:
+            warn("access_token_long", "Access tokens longer than 60 minutes weaken revocation.")
+        return out
+
+    @model_validator(mode="after")
+    def _enforce_production_rules(self) -> Settings:
+        if self.is_prod:
+            problems = [f.message for f in self.findings() if f.level == "error"]
+            if problems:
+                raise ValueError("Unsafe production configuration:\n  - " + "\n  - ".join(problems))
+        return self
+
+    def describe(self) -> dict:
+        """Safe-to-log summary: secrets appear only as set/unset + length."""
+        def shown(name: str) -> str:
+            value = self.secret(name)
+            return f"set(len={len(value)})" if value else "unset"
+
+        return {
+            "env": self.env, "version": self.version, "host": self.host, "port": self.port,
+            "database": "sqlite" if self.is_sqlite else "postgresql",
+            "database_ssl": None if self.is_sqlite else self.database_ssl,
+            "redis": "configured" if self.redis_url_value else "none (in-process)",
+            "jwt_secret": shown("jwt_secret"), "data_key": shown("data_key"),
+            "metrics_token": shown("metrics_token"), "cookie_secure": self.secure_cookies,
+            "allowed_hosts": self.host_list,
+        }
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    low = value.lower()
+    return any(p in low for p in _PLACEHOLDERS) or len(set(value)) < 10
+
+
+# ------------------------------------------------------------------ dev secret bootstrap
+def _write_private(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:  # Windows: access is governed by the per-user profile ACL
+        pass
+
+
+def with_dev_secrets(settings: Settings) -> Settings:
+    """Fill missing secrets for a DEV install from a private file in the data dir.
+
+    Never used in prod (there, missing secrets are a startup error). The generated file
+    is stable across restarts, so sessions and encrypted data survive a restart.
+    """
+    if settings.is_prod:
+        return settings
+    from cryptography.fernet import Fernet
+
+    path = settings.data_dir / "dev_secrets.json"
+    stored = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    changed = False
+    if not settings.secret("jwt_secret") and "jwt_secret" not in stored:
+        stored["jwt_secret"], changed = secrets.token_urlsafe(48), True
+    if not settings.secret("data_key") and "data_key" not in stored:
+        stored["data_key"], changed = Fernet.generate_key().decode(), True
+    if changed:
+        _write_private(path, stored)
+    updates = {}
+    if not settings.secret("jwt_secret"):
+        updates["jwt_secret"] = SecretStr(stored["jwt_secret"])
+    if not settings.secret("data_key"):
+        updates["data_key"] = SecretStr(stored["data_key"])
+    return settings.model_copy(update=updates) if updates else settings
+
+
+def warn_if_env_file_is_world_readable(path: Path = Path(".env")) -> Optional[str]:
+    """POSIX only: a group/world-readable .env leaks secrets to other local users."""
+    if os.name == "nt" or not path.exists():
+        return None
+    mode = path.stat().st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return f"{path} is readable by other users; run: chmod 600 {path}"
+    return None
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return with_dev_secrets(Settings())

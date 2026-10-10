@@ -1,0 +1,49 @@
+# Low-memory profile for small machines (e.g. a 4 GB laptop running Docker Desktop).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d --build
+#
+# It only shrinks resource use: one API replica, smaller limits, smaller connection pools,
+# a tuned-down Postgres and a smaller Redis cache. Every security setting from the main file
+# (internal network, read-only containers, dropped capabilities, file-based secrets) is
+# inherited unchanged. This is explicit opt-in on purpose: it must never silently apply to a
+# real deployment, so it is NOT named docker-compose.override.yml.
+
+services:
+  api:
+    deploy:
+      replicas: 1
+      resources: { limits: { cpus: "1.0", memory: 320M } }
+    environment:
+      JARVIS_DB_POOL_SIZE: "3"
+      JARVIS_DB_MAX_OVERFLOW: "2"
+      JARVIS_CACHE_MAX_LOCAL_ITEMS: "1000"
+
+  worker:
+    deploy:
+      resources: { limits: { cpus: "0.5", memory: 256M } }
+    environment:
+      JARVIS_DB_POOL_SIZE: "2"
+      JARVIS_DB_MAX_OVERFLOW: "1"
+
+  migrate:
+    environment:
+      JARVIS_DB_POOL_SIZE: "1"
+      JARVIS_DB_MAX_OVERFLOW: "0"
+
+  postgres:
+    command: >
+      postgres -c shared_buffers=64MB -c effective_cache_size=192MB -c work_mem=2MB
+      -c maintenance_work_mem=32MB -c max_connections=30
+    deploy:
+      resources: { limits: { memory: 384M } }
+
+  redis:
+    command: >
+      sh -c 'exec redis-server --requirepass "$$(cat /run/secrets/redis_password)"
+      --save "" --appendonly no --maxmemory 48mb --maxmemory-policy allkeys-lru'
+    deploy:
+      resources: { limits: { memory: 96M } }
+
+  nginx:
+    deploy:
+      resources: { limits: { memory: 48M } }

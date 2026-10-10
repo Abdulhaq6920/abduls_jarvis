@@ -1,0 +1,158 @@
+# JARVIS production-style stack.
+#
+#   Full walkthrough for Windows: docs/DOCKER_WINDOWS.md
+#
+#   1.  python scripts/make_docker_secrets.py          (writes ./secrets/*, prints no values)
+#   2.  copy docker/env.docker.example docker/.env.docker   and edit it
+#   3.  scripts\dc.ps1 up -d --build                    (wrapper that adds --env-file and the profile)
+#   4.  scripts\dc.ps1 run --rm api create-admin        (first dashboard user)
+#   5.  scale the API (full profile only):  scripts\dc.ps1 -Full up -d --scale api=3
+#
+# Topology
+#
+#   internet -> nginx (the ONLY published port) -> api x N --> postgres
+#                                                   |     \-> redis
+#                                             worker (the ONE scheduler)
+#
+# `data` is an internal network: postgres and redis have no route to or from the internet.
+
+name: jarvis
+
+x-backend: &backend
+  build: { context: ., dockerfile: docker/Dockerfile }
+  image: jarvis-backend:local
+  restart: unless-stopped
+  read_only: true                        # the container filesystem is immutable
+  tmpfs: [/tmp]                          # the only writable path
+  cap_drop: [ALL]                        # no Linux capabilities needed
+  security_opt: ["no-new-privileges:true"]
+  environment: &backend-env
+    # prod is the default and REQUIRES an https:// origin. For a laptop test with no TLS, set
+    # JARVIS_ENV=dev in docker/.env.docker (secrets are still files and the DB is still Postgres).
+    JARVIS_ENV: ${JARVIS_ENV:-prod}
+    JARVIS_DATABASE_SSL: ${JARVIS_DATABASE_SSL:-prefer}   # use verify-full for a managed/remote DB
+    JARVIS_ALLOWED_HOSTS: ${JARVIS_ALLOWED_HOSTS:?set JARVIS_ALLOWED_HOSTS in .env}
+    JARVIS_PUBLIC_ORIGIN: ${JARVIS_PUBLIC_ORIGIN:?set JARVIS_PUBLIC_ORIGIN in .env}
+    JARVIS_TRUSTED_PROXY_HOPS: "1"       # exactly one proxy (nginx) sits in front
+    JARVIS_LOG_FORMAT: json
+    JARVIS_LOG_LEVEL: ${JARVIS_LOG_LEVEL:-INFO}
+    JARVIS_SECRETS_DIR: /run/secrets     # secrets are files, not environment variables
+    TZ: ${TZ:-UTC}
+  secrets: &backend-secrets
+    - jarvis_jwt_secret
+    - jarvis_data_key
+    - jarvis_metrics_token
+    - jarvis_database_url
+    - jarvis_redis_url
+  networks: [data]
+
+services:
+  # ------------------------------------------------------------------ one-shot setup
+  migrate:
+    <<: *backend
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: { disable: true }
+
+  # --------------------------------------------------------------------- the API
+  api:
+    <<: *backend
+    command: ["serve"]
+    environment:
+      <<: *backend-env
+      JARVIS_RUN_SCHEDULER: "false"      # replicas must NOT run cron jobs; the worker does
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    deploy:
+      replicas: 2
+      resources: { limits: { cpus: "1.0", memory: 512M } }
+    networks: [data, edge]
+    # No `ports:`: replicas share nothing on the host. nginx reaches them by service name.
+
+  # ------------------------------------------------------- the single scheduler
+  worker:
+    <<: *backend
+    command: ["worker"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    deploy:
+      replicas: 1                        # NEVER scale this: N workers = every job fires N times
+      resources: { limits: { cpus: "0.5", memory: 384M } }
+    healthcheck: { disable: true }       # no HTTP port; supervised by restart policy
+
+  # ---------------------------------------------------------------- reverse proxy
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${JARVIS_HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [api]
+    networks: [edge]
+    # TLS: terminate at a load balancer / Caddy / Traefik in front of this, or add a `listen
+    # 443 ssl` block with your certificate. See docs/DEPLOYMENT.md. Do not expose plain HTTP
+    # to the internet: login credentials and tokens travel over it.
+
+  # ---------------------------------------------------------------------- data tier
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jarvis
+      POSTGRES_DB: jarvis
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis -d jarvis"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]                     # internal only
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Password from a file, persistence off (it is a cache: everything in it is rebuildable),
+    # and a memory cap with eviction so it can never grow without bound.
+    command: >
+      sh -c 'exec redis-server --requirepass "$$(cat /run/secrets/redis_password)"
+      --save "" --appendonly no --maxmemory 128mb --maxmemory-policy allkeys-lru'
+    secrets: [redis_password]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+
+networks:
+  data: { internal: true }               # no internet route in or out
+  edge: {}
+
+volumes:
+  pgdata: {}
+
+# Each secret is a file under ./secrets (git-ignored, excluded from images). Compose mounts
+# it at /run/secrets/<name>, readable only inside the containers that list it.
+secrets:
+  jarvis_jwt_secret:     { file: ./secrets/jarvis_jwt_secret }
+  jarvis_data_key:       { file: ./secrets/jarvis_data_key }
+  jarvis_metrics_token:  { file: ./secrets/jarvis_metrics_token }
+  jarvis_database_url:   { file: ./secrets/jarvis_database_url }   # postgresql+asyncpg://jarvis:PW@postgres:5432/jarvis
+  jarvis_redis_url:      { file: ./secrets/jarvis_redis_url }      # redis://:PW@redis:6379/0
+  postgres_password:     { file: ./secrets/postgres_password }
+  redis_password:        { file: ./secrets/redis_password }

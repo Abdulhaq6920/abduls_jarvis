@@ -1,0 +1,13 @@
+# Copy to  %USERPROFILE%\.wslconfig   (note the leading dot, no extension), then run:
+#     wsl --shutdown
+# and restart Docker Desktop.
+#
+# Docker Desktop runs inside a WSL2 virtual machine, which by default may take up to half of
+# your RAM and rarely gives it back. On a 4 GB machine that starves Windows. This caps it.
+[wsl2]
+memory=2GB        # the most Docker's VM may use (Windows keeps the rest)
+processors=2
+swap=2GB          # swap file for bursts; lives on disk, costs no RAM
+
+[experimental]
+autoMemoryReclaim=gradual   # hand idle memory back to Windows instead of hoarding it

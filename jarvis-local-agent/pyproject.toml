@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-local-agent"
+version = "0.1.0"
+description = "JARVIS persistent Windows runtime: wake word, STT/TTS, tray, local tools."
+requires-python = ">=3.10"
+dependencies = [
+    "jarvis-shared",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# Real microphone voice on Windows, fully offline. This is what `jarvis-voice` uses.
+# The overlay itself needs nothing extra (tkinter ships with Python).
+voice = [
+    "sounddevice>=0.4",       # microphone capture
+    "vosk>=0.3.45",           # local wake word + local STT (no API key)
+    "pyttsx3>=2.90",          # offline TTS (SAPI5 on Windows)
+]
+# Alternative production wake word / STT engines, if you prefer them.
+voice-alt = [
+    "pvporcupine>=3.0",       # Porcupine wake word (needs an access key)
+    "faster-whisper>=1.0",    # Whisper local STT
+]
+tray = [
+    "pystray>=0.19",
+    "Pillow>=10.0",
+    "win10toast-click>=0.1.2; sys_platform == 'win32'",
+]
+
+[project.scripts]
+jarvis-local-agent = "jarvis_local_agent.__main__:main"
+# Voice-first launcher: real microphone + centre-screen wave overlay.
+jarvis-voice = "jarvis_local_agent.voice_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

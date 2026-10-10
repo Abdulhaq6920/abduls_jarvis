@@ -1,0 +1,9 @@
+# Store every text file with LF line endings, whatever OS you edit on. Windows CRLF inside a
+# Dockerfile, shell script or nginx.conf breaks Linux builds; this makes that impossible.
+* text=auto eol=lf
+
+# Binary files: never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary

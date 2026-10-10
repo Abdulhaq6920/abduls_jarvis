@@ -1,0 +1,23 @@
+# Keep secrets, local data and tooling OUT of the build context so they can never be
+# baked into an image layer (layers are permanent and readable by anyone with the image).
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+dev_secrets.json
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.jarvis
+*.db
+*.log
+tests
+docs
+ui-shots
+jarvis-local-agent

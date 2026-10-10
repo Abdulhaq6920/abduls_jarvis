@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read            # least privilege: CI can read the repo and nothing else
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - name: Install (pinned)
+        run: |
+          pip install -c constraints.txt -e jarvis-shared "./jarvis-backend[postgres,dev]" -e jarvis-local-agent
+          pip install pytest pytest-asyncio fakeredis pyyaml playwright
+      - name: Lint
+        run: ruff check jarvis-shared jarvis-backend jarvis-local-agent tests
+      - name: Tests (includes real PostgreSQL via pgserver)
+        run: pytest tests/unit tests/integration -q
+        env:
+          # Tests use throwaway secrets generated per run; nothing here is a real credential.
+          JARVIS_ENV: dev
+
+  audit:
+    name: Dependency vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: pip-audit against the exact pinned set
+        run: |
+          pip install pip-audit
+          pip-audit -r constraints.txt --strict
+
+  secrets:
+    name: Committed-secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }      # scan history, not just the tip
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+
+  image:
+    name: Docker build + scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -f docker/Dockerfile -t jarvis-backend:ci .
+      - name: Image must not contain secrets or tests
+        run: |
+          docker run --rm --entrypoint sh jarvis-backend:ci -c '! find / -name ".env" -not -path "/proc/*" 2>/dev/null | grep . && ! test -d /src'
+      - name: Image runs as non-root
+        run: test "$(docker run --rm --entrypoint id jarvis-backend:ci -u)" = "10001"
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: jarvis-backend:ci
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true

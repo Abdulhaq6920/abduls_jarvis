@@ -1,0 +1,39 @@
+# Workspace-level tool configuration (this repo is three installable packages; see
+# jarvis-shared/, jarvis-backend/, jarvis-local-agent/).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra -p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "tests/live_runtime_demo.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = [
+  "E501",   # long lines are handled by the formatter / readability, not a hard error
+  "S101",   # assert is fine in tests
+  "S603",   # subprocess without shell is the *intended* safe pattern here
+  "S607",
+  "UP007", "UP035", "UP006", "UP045",  # keep typing.Optional/List style for 3.10 compat
+  "UP042",  # (str, Enum) is required: StrEnum needs Python 3.11 and the packages support 3.10
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection pattern puts Depends()/Query() in argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.Body"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "B011", "S108", "B007"]
+# Audio/window teardown is best-effort BY DESIGN: if closing a microphone stream or a Tk window
+# fails while shutting down, there is nothing useful to do and raising would mask the real exit
+# reason. These four files are the only exemption from S110; security-relevant code is not here.
+"jarvis-local-agent/src/jarvis_local_agent/voice_local.py" = ["S110"]
+"jarvis-local-agent/src/jarvis_local_agent/overlay.py" = ["S110", "S311"]  # S311: cosmetic animation jitter
+"jarvis-local-agent/src/jarvis_local_agent/tts.py" = ["S110"]
+"jarvis-local-agent/src/jarvis_local_agent/notifications.py" = ["S110"]
