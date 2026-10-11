@@ -49,6 +49,9 @@ async def metrics(request: Request, c: Container = Depends(get_container)) -> Re
     m.cache_fallback.set(1 if stats.fallback_active else 0)
     m.cache_local_items.set(c.cache.local_items)
     m.pending_approvals.set(len(await c.approvals.list(status="PENDING", limit=500)))
+    budget = (await c.llm.status()).get("budget")
+    if budget:
+        m.llm_budget_ratio.set(budget["ratio"])
     pool = getattr(c.db.engine.pool, "checkedout", None)
     if pool:
         m.db_pool_checked_out.set(pool())
@@ -64,7 +67,7 @@ async def status(request: Request, c: Container = Depends(get_container)) -> dic
         "database_ok": await c.db.ping(), "cache_ok": await c.cache.healthy(),
         "scheduler_running": bool(c.scheduler and c.scheduler.running),
         "agents": len(c.registry.all()), "pending_approvals": pending,
-        "runtime": snapshot, "config_findings": [
+        "runtime": snapshot, "llm": await c.llm.status(), "config_findings": [
             {"level": f.level, "code": f.code, "message": f.message} for f in c.settings.findings()],
     }
 

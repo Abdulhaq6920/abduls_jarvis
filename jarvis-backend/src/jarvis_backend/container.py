@@ -11,16 +11,19 @@ from typing import Optional
 from jarvis_shared.log import get_logger
 
 from jarvis_backend.agents.registry import AgentConfig, AgentRegistry
+from jarvis_backend.agents.runtime import AgentLimits
 from jarvis_backend.auth.service import AuthService
 from jarvis_backend.auth.tokens import TokenCodec, build_codec
 from jarvis_backend.cache import Cache, build_cache
 from jarvis_backend.config import Settings
 from jarvis_backend.core.policy import PolicyEngine
+from jarvis_backend.core.llm_router import LLMRouter
 from jarvis_backend.core.router import KeywordRouter
 from jarvis_backend.core.supervisor import Supervisor
 from jarvis_backend.crypto import FieldCipher, set_cipher
 from jarvis_backend.events import EventBus, build_bus
 from jarvis_backend.jobs import JobRunner, JobScheduler
+from jarvis_backend.llm.service import LLMService, build_llm_service
 from jarvis_backend.ratelimit import RateLimiter
 from jarvis_backend.storage import (
     AgentSettingsStore,
@@ -59,6 +62,7 @@ class Container:
     policy: PolicyEngine
     supervisor: Supervisor
     job_runner: JobRunner
+    llm: LLMService
     scheduler: Optional[JobScheduler] = None
 
     @classmethod
@@ -90,21 +94,27 @@ class Container:
         registry = AgentRegistry()
         agent_config = AgentConfig(AgentSettingsStore(db), cache)
         policy = PolicyEngine()
+        llm = build_llm_service(settings, kv)
+        router = LLMRouter(llm) if llm.enabled else KeywordRouter()
+        limits = AgentLimits(
+            max_steps=settings.llm_max_steps, max_tokens=settings.llm_max_tokens,
+            max_depth=settings.llm_delegation_depth, budget_seconds=settings.llm_request_budget_seconds)
         supervisor = Supervisor(
-            registry=registry, config=agent_config, router=KeywordRouter(), policy=policy,
+            registry=registry, config=agent_config, router=router, policy=policy,
             approvals=approvals, audit=audit, turns=turns, memory=memory, bus=bus,
-            history_turns=settings.history_turns,
+            history_turns=settings.history_turns, llm=llm, limits=limits,
         )
         runner = JobRunner(supervisor, job_runs, audit, bus)
         log.info("container ready", extra=settings.describe() | {"cache": cache.backend, "bus": bus.kind})
         return cls(settings=settings, db=db, cache=cache, limiter=limiter, bus=bus, codec=codec,
                    auth=auth, audit=audit, approvals=approvals, memory=memory, turns=turns,
                    job_runs=job_runs, kv=kv, registry=registry, agent_config=agent_config,
-                   policy=policy, supervisor=supervisor, job_runner=runner)
+                   policy=policy, supervisor=supervisor, job_runner=runner, llm=llm)
 
     async def close(self) -> None:
         if self.scheduler:
             self.scheduler.shutdown()
+        await self.llm.aclose()
         await self.bus.close()
         await self.cache.close()
         await self.db.dispose()

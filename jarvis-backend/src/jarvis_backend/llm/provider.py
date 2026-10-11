@@ -59,6 +59,7 @@ class CircuitBreaker:
         self._failures = 0
         self._open_until = 0.0
         self._trial_in_flight = False
+        self.cause: Optional[ErrorKind] = None  # what last opened the circuit
 
     @property
     def state(self) -> str:
@@ -81,9 +82,10 @@ class CircuitBreaker:
     def release(self) -> None:
         self._trial_in_flight = False
 
-    def failure(self, cooldown: Optional[float] = None) -> None:
+    def failure(self, cooldown: Optional[float] = None, cause: Optional[ErrorKind] = None) -> None:
         self._trial_in_flight = False
         self._failures += 1
+        self.cause = cause
         if cooldown is not None or self._failures >= self._threshold:
             self._open_until = self._clock() + (cooldown if cooldown is not None else self._cooldown)
 
@@ -188,7 +190,7 @@ class OpenAICompatProvider:
             body["tool_choice"] = "auto"
 
         if not self.breaker.allow():
-            raise LLMError("circuit_open", f"retry in {self.breaker.retry_in():.0f}s")
+            raise LLMError("circuit_open", f"retry in {self.breaker.retry_in():.0f}s", cause=self.breaker.cause)
 
         last: Optional[LLMError] = None
         for attempt in range(self._max_retries + 1):
@@ -203,7 +205,7 @@ class OpenAICompatProvider:
             except LLMError as exc:
                 last = exc
                 if exc.kind in ("auth", "credits"):
-                    self.breaker.failure(cooldown=60.0)  # retrying cannot help; stop spending latency
+                    self.breaker.failure(cooldown=60.0, cause=exc.kind)  # retrying cannot help
                     raise
                 if exc.kind not in _RETRYABLE:
                     # A bad request is our bug, not the service's: it must not trip the breaker.
@@ -211,7 +213,7 @@ class OpenAICompatProvider:
                         self.breaker.success()
                     raise
                 if attempt == self._max_retries:
-                    self.breaker.failure()
+                    self.breaker.failure(cause=exc.kind)
                     raise
                 await self._sleep(self._backoff(attempt, exc.retry_after))
         assert last is not None  # pragma: no cover - the loop always returns or raises

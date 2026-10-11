@@ -67,6 +67,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         container = await Container.create(settings)
         app.state.container = container
+        container.llm.on_call = metrics.record_llm
         background = [asyncio.create_task(monitor_event_loop(metrics), name="loop-monitor")]
         if settings.run_scheduler:
             container.scheduler = JobScheduler(container.job_runner, settings.timezone,

@@ -52,6 +52,23 @@ class Metrics:
         self.cache_local_items = Gauge("jarvis_cache_local_items", "In-process cache entries", registry=r)
         self.db_pool_checked_out = Gauge("jarvis_db_pool_checked_out", "DB connections in use", registry=r)
         self.pending_approvals = Gauge("jarvis_pending_approvals", "Approvals awaiting a human", registry=r)
+        # Label values are config-controlled model ids, agent ids or fixed outcome names: bounded.
+        self.llm_requests = Counter("jarvis_llm_requests_total", "Language-model calls",
+                                    ["model", "outcome"], registry=r)
+        self.llm_tokens = Counter("jarvis_llm_tokens_total", "Language-model tokens",
+                                  ["model", "kind"], registry=r)
+        self.llm_seconds = Histogram("jarvis_llm_seconds", "Language-model call latency", ["model"],
+                                     buckets=(0.25, 0.5, 1, 2, 4, 8, 16, 32, 64), registry=r)
+        self.llm_budget_ratio = Gauge("jarvis_llm_budget_used_ratio", "Daily token budget used (0-1)", registry=r)
+
+    def record_llm(self, call) -> None:
+        """Hook for LLMService.on_call: one finished model call."""
+        self.llm_requests.labels(call.model, call.outcome).inc()
+        self.llm_seconds.labels(call.model).observe(call.latency_ms / 1000)
+        if call.prompt_tokens:
+            self.llm_tokens.labels(call.model, "prompt").inc(call.prompt_tokens)
+        if call.completion_tokens:
+            self.llm_tokens.labels(call.model, "completion").inc(call.completion_tokens)
 
     def refresh_process(self) -> None:
         with _PROCESS.oneshot():

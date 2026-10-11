@@ -102,13 +102,17 @@ class LLMError(Exception):
     """A model call failed. ``spoken`` is safe to read aloud; ``detail`` is for logs only."""
 
     def __init__(self, kind: ErrorKind, detail: str = "", *, status: int | None = None,
-                 retry_after: float | None = None) -> None:
+                 retry_after: float | None = None, cause: ErrorKind | None = None) -> None:
         super().__init__(f"{kind}: {detail}" if detail else kind)
         self.kind: ErrorKind = kind
+        # For circuit_open: the failure that opened the circuit (so we can still say *why*).
+        self.cause: ErrorKind | None = cause
         self.detail = detail
         self.status = status
         self.retry_after = retry_after
 
     @property
     def spoken(self) -> str:
+        if self.kind == "circuit_open" and self.cause in ("credits", "auth"):
+            return _SPOKEN[self.cause]  # a pause caused by credits/auth is still "credits/auth"
         return _SPOKEN.get(self.kind, "the language model is unavailable")

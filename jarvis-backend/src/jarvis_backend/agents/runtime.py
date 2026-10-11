@@ -11,20 +11,64 @@ integrations are the ``# SEAM`` markers below.
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from jarvis_shared.agents import AgentId, AgentSpec
 from jarvis_shared.security import RiskLevel, ToolRequest
 
 from jarvis_backend.storage.memory import MemoryFull, MemoryStore
 
+if TYPE_CHECKING:  # pragma: no cover
+    from jarvis_backend.llm.service import LLMService
+
 
 @dataclass
 class AgentOutcome:
     speech: str
     tool_requests: List[ToolRequest] = field(default_factory=list)
+    # Agent-to-agent hand-offs that happened inside this outcome: (agent_id, note). Shown in the
+    # supervisor trace so the dashboard can draw the real chain.
+    hops: List[Tuple[str, str]] = field(default_factory=list)
+    tokens: int = 0  # model tokens spent producing this outcome (0 for rule-based agents)
+
+
+@dataclass(frozen=True)
+class AgentLimits:
+    """Hard ceilings for one user request. Nothing an LLM says can raise them."""
+
+    max_steps: int = 5          # model rounds per agent
+    max_tokens: int = 800       # per model call
+    max_depth: int = 2          # agent -> agent hand-offs
+    max_delegations: int = 3    # total hand-offs in one request
+    max_device_requests: int = 3
+    budget_seconds: float = 60.0
+
+
+@dataclass
+class RunState:
+    """Shared by every agent that takes part in answering one request."""
+
+    deadline: float                       # time.monotonic() value after which we stop calling models
+    depth: int = 0
+    trail: Tuple[str, ...] = ()           # agents already on this hand-off path (cycle guard)
+    counters: Dict[str, int] = field(default_factory=lambda: {"delegations": 0})
+
+    @classmethod
+    def start(cls, budget_seconds: float) -> "RunState":
+        return cls(deadline=time.monotonic() + budget_seconds)
+
+    def child(self, parent: AgentId) -> "RunState":
+        return RunState(self.deadline, self.depth + 1, self.trail + (parent.value,), self.counters)
+
+    @property
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+
+DelegateFn = Callable[[AgentId, str, Dict[str, Any], RunState], Awaitable["AgentOutcome"]]
 
 
 @dataclass
@@ -32,6 +76,9 @@ class AgentServices:
     """Everything an agent may use. Passed in, so agents stay easy to test."""
 
     memory: MemoryStore
+    llm: Optional["LLMService"] = None
+    limits: AgentLimits = field(default_factory=AgentLimits)
+    delegate: Optional[DelegateFn] = None
 
 
 class BaseAgent:
@@ -181,4 +228,14 @@ _AGENT_CLASSES = {
 
 
 def build_agent(spec: AgentSpec, services: AgentServices) -> BaseAgent:
-    return _AGENT_CLASSES.get(spec.id, UnconnectedAgent)(spec, services)
+    """An LLM-driven agent when a model is connected; the rule-based agent otherwise.
+
+    The rule-based agent is always kept as the fallback inside the LLM agent, so a model outage
+    degrades behaviour instead of breaking requests.
+    """
+    rule_based = _AGENT_CLASSES.get(spec.id, UnconnectedAgent)(spec, services)
+    if services.llm is not None and services.llm.enabled:
+        from jarvis_backend.agents.llm_agent import LLMAgent  # local import: avoids a cycle
+
+        return LLMAgent(spec, services, fallback=rule_based)
+    return rule_based

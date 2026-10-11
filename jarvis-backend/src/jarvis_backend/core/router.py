@@ -36,6 +36,7 @@ class RouteDecision:
     explicit: bool
     reason: str
     task: str  # the request with the wake phrase / "ask X to" preamble removed
+    score: int = 0  # keyword matches behind the decision (0 = none or explicit)
 
 
 class Router(Protocol):
@@ -73,6 +74,6 @@ class KeywordRouter:
 
         if best is not None:
             return RouteDecision(best.id, False,
-                                 f"Matched {best_score} keyword(s) for {best.id.value}.", text)
+                                 f"Matched {best_score} keyword(s) for {best.id.value}.", text, best_score)
         return RouteDecision(AgentId.JARVIS, False,
                              "No specialist matched; JARVIS answers directly.", text)

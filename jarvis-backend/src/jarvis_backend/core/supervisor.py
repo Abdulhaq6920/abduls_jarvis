@@ -25,10 +25,18 @@ from jarvis_shared.security import ToolRequest
 from jarvis_shared.supervisor import SupervisorStage
 
 from jarvis_backend.agents.registry import AgentConfig, AgentRegistry
-from jarvis_backend.agents.runtime import AgentOutcome, AgentServices, build_agent
+from jarvis_backend.agents.llm_agent import LLMAgent
+from jarvis_backend.agents.runtime import (
+    AgentLimits,
+    AgentOutcome,
+    AgentServices,
+    RunState,
+    build_agent,
+)
 from jarvis_backend.core.policy import PolicyEngine, describe_request
 from jarvis_backend.core.router import RouteDecision, Router
 from jarvis_backend.events import EventBus
+from jarvis_backend.llm.service import LLMService
 from jarvis_backend.storage import ApprovalStore, AuditLog, MemoryStore, TurnStore
 
 log = get_logger(__name__)
@@ -49,12 +57,15 @@ class Supervisor:
         memory: MemoryStore,
         bus: EventBus,
         history_turns: int = 6,
+        llm: Optional[LLMService] = None,
+        limits: Optional[AgentLimits] = None,
     ) -> None:
         self.registry, self.config, self.router, self.policy = registry, config, router, policy
         self.approvals, self.audit, self.turns = approvals, audit, turns
         self.memory, self.bus = memory, bus
         self._history_turns = history_turns
-        self._services = AgentServices(memory=memory)
+        self._limits = limits or AgentLimits()
+        self._services = AgentServices(memory=memory, llm=llm, limits=self._limits, delegate=self._delegate)
 
     async def handle(self, req: AssistRequest) -> AssistResponse:
         started = time.perf_counter()
@@ -80,7 +91,13 @@ class Supervisor:
         # PROPOSE ---------------------------------------------------------------
         spec = self.registry.get(decision.agent_id)
         agent = build_agent(spec, self._services)
-        outcome: AgentOutcome = await agent.handle(decision.task, context)
+        if isinstance(agent, LLMAgent):
+            outcome: AgentOutcome = await agent.run(
+                decision.task, context, RunState.start(self._limits.budget_seconds))
+        else:
+            outcome = await agent.handle(decision.task, context)
+        for hop_agent, note in outcome.hops:  # the real agent-to-agent chain, for the dashboard
+            stage(SupervisorStage.PROPOSE, note, AgentId(hop_agent))
         stage(SupervisorStage.PROPOSE, f"{len(outcome.tool_requests)} tool request(s)", decision.agent_id)
 
         # APPROVE ---------------------------------------------------------------
@@ -106,8 +123,8 @@ class Supervisor:
         )
         await self._persist_and_publish(req, response, latency_ms)
         log.info("assist handled", extra={"agent": decision.agent_id.value, "latency_ms": latency_ms,
-                                          "tools": len(allowed), "gated": pending_id is not None,
-                                          "blocked": blocked})
+                                          "tools": len(allowed), "llm_tokens": outcome.tokens,
+                                          "gated": pending_id is not None, "blocked": blocked})
         return response
 
     # ------------------------------------------------------------------ stages
@@ -123,8 +140,21 @@ class Supervisor:
             "memories": [m.text for m in memories],
         }
 
+    async def _delegate(self, agent_id: AgentId, task: str, context: Dict[str, Any],
+                        state: RunState) -> AgentOutcome:
+        """Run another agent on behalf of one that asked for help (bounded by ``state``)."""
+        spec = self.registry.get(agent_id)
+        if spec is None or not await self.config.is_enabled(agent_id):
+            return AgentOutcome(f"{agent_id.value} is not available.")
+        agent = build_agent(spec, self._services)
+        if isinstance(agent, LLMAgent):
+            return await agent.run(task, context, state)
+        return await agent.handle(task, context)
+
     async def _plan(self, req: AssistRequest) -> tuple[RouteDecision, Optional[str]]:
-        decision = self.router.route(req.utterance, self.registry.all())
+        agents = self.registry.all()
+        aroute = getattr(self.router, "aroute", None)  # the LLM router is async; keywords are not
+        decision = await aroute(req.utterance, agents) if aroute else self.router.route(req.utterance, agents)
         if await self.config.is_enabled(decision.agent_id):
             return decision, None
         name = self.registry.get(decision.agent_id).display_name
