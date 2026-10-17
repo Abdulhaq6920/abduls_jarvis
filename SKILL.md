@@ -149,3 +149,24 @@ JARVIS_ALLOWED_APPS=notepad,code,explorer,chrome,msedge
 3. The LLM/agents never receive raw shell/filesystem/input — only `ToolRequest`s through both gates.
 4. Commands never touch a shell; shell metacharacters are DANGEROUS by definition.
 5. An agent never claims work it did not do.
+6. Approving a high-risk action (DANGEROUS, or RESTRICTED when configured) requires a **fresh
+   second factor** when the admin has MFA — a stolen live session alone cannot grant it. Step-up
+   only adds a gate; it never unlocks a hard block, and the agent/device role stays 403.
+
+## 8. Operator authentication (MFA + step-up)
+
+TOTP MFA is opt-in per admin (RFC 6238; implemented in stdlib — the runtime never imports
+`pyotp`). Enroll in the dashboard (System → Two-factor authentication) or via the CLI
+(`python -m jarvis_backend enroll-mfa --username <name>`). The secret is field-encrypted at rest
+and never returned after confirmation; ten one-time recovery codes are shown once and stored as
+argon2 hashes. With MFA on, a password returns an `mfa_pending` challenge (a distinct token type
+rejected by every protected route), and real tokens are issued only after a valid code. See
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the enrollment and lost-authenticator runbook.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `JARVIS_MFA_ISSUER` | `JARVIS` | Name shown in the authenticator app / otpauth URI |
+| `JARVIS_MFA_RECOVERY_CODES` | `10` | One-time recovery codes generated at enablement |
+| `JARVIS_STEP_UP_WINDOW_SECONDS` | `300` | How long a step-up proof stays fresh for a grant |
+| `JARVIS_APPROVAL_REQUIRE_MFA` | `false` | Require the admin to have MFA for high-risk grants |
+| `JARVIS_APPROVAL_STEP_UP_RISK` | `DANGEROUS` | Lowest risk that forces step-up (`DANGEROUS`/`RESTRICTED`) |

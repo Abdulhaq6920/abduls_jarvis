@@ -59,13 +59,20 @@ async def metrics(request: Request, c: Container = Depends(get_container)) -> Re
 async def status(request: Request, c: Container = Depends(get_container)) -> dict:
     pending = len(await c.approvals.list(status="PENDING", limit=500))
     snapshot = runtime_snapshot(request.app.state.metrics, c, request.app.state.ws_count())
+    findings = [{"level": f.level, "code": f.code, "message": f.message}
+                for f in c.settings.findings()]
+    # Runtime posture (needs the DB, so it lives here not in Settings.findings): in prod, warn
+    # -- never block -- when no admin has enrolled MFA. A warning only; startup is unaffected.
+    if c.settings.is_prod and not await c.auth.users.any_admin_has_mfa():
+        findings.append({"level": "warning", "code": "no_admin_mfa",
+                         "message": "No admin has MFA enabled. Enroll a second factor "
+                                    "(python -m jarvis_backend enroll-mfa --username <name>)."})
     return {
         "version": c.settings.version, "env": c.settings.env,
         "database_ok": await c.db.ping(), "cache_ok": await c.cache.healthy(),
         "scheduler_running": bool(c.scheduler and c.scheduler.running),
         "agents": len(c.registry.all()), "pending_approvals": pending,
-        "runtime": snapshot, "config_findings": [
-            {"level": f.level, "code": f.code, "message": f.message} for f in c.settings.findings()],
+        "runtime": snapshot, "config_findings": findings,
     }
 
 

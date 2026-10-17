@@ -99,6 +99,57 @@ never user input, so series stay bounded.
 - **Lost/compromised PC:** revoke the device on the dashboard. Its token dies on the next request and
   it cannot mint a new one.
 
+## Multi-factor auth (TOTP) & step-up
+
+MFA is **opt-in per admin**. TOTP is RFC 6238 (SHA1 / 6 digits / 30s) and works with Google
+Authenticator, Authy, or Microsoft Authenticator.
+
+**Enroll:**
+
+- Dashboard → System → Two-factor authentication → **Enable MFA**: scan the shown `otpauth://`
+  URI (or type the base32 secret in manually), enter the code to confirm, then **save the ten
+  one-time recovery codes** — they are shown only once.
+- Or from the CLI: `python -m jarvis_backend enroll-mfa --username <name>`. It prints the URI +
+  secret for manual entry, waits for a confirming code, then prints the recovery codes once.
+
+**Recovery codes:** ten are generated at enablement, stored only as argon2 hashes (never
+plaintext), and each works exactly once. Store them in your password manager, not on the same
+device as the authenticator. They are shown only at enrollment — re-enroll to get a fresh set.
+
+**Login with MFA:** a password returns an `mfa_pending` challenge (not an access token); the
+dashboard then asks for a code (a recovery code also works). The code step is rate-limited like
+the password step, and a TOTP replayed in the same 30s window is rejected.
+
+**Disable:** requires the current password **and** a valid code (TOTP or recovery) — never the
+password alone.
+
+**Step-up on high-risk approvals:** when an MFA admin GRANTs a DANGEROUS approval (or RESTRICTED
+if `JARVIS_APPROVAL_STEP_UP_RISK=RESTRICTED`), the dashboard prompts for a code; or pre-authorize
+with the step-up endpoint and the grant is accepted for `JARVIS_STEP_UP_WINDOW_SECONDS` (default
+300). An admin without MFA keeps today's behaviour (audited warning); set
+`JARVIS_APPROVAL_REQUIRE_MFA=true` to require MFA for high-risk grants.
+
+**Lost authenticator runbook:**
+
+1. Sign in with a **recovery code** at the code prompt (it counts as the second factor).
+2. In the dashboard, **Disable MFA** (password + a remaining recovery code), then **Enable MFA**
+   again with the new device to get a fresh secret and new recovery codes.
+3. If no recovery code remains, an operator with database access can clear the user's MFA columns
+   (`mfa_enabled=false`, `mfa_secret=NULL`, `mfa_recovery_hashes=NULL`) so the user can re-enroll;
+   or disable then recreate the account.
+
+**Schema note (no Alembic yet):** fresh databases get the new `users.mfa_*` and
+`sessions.step_up_at` columns automatically via `create_all`. An **existing** production database
+needs a one-time manual migration until Phase 5 adds Alembic, e.g.:
+
+```sql
+ALTER TABLE users ADD COLUMN mfa_secret TEXT;
+ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN mfa_last_counter INTEGER;
+ALTER TABLE users ADD COLUMN mfa_recovery_hashes TEXT;
+ALTER TABLE sessions ADD COLUMN step_up_at TIMESTAMPTZ;
+```
+
 ## Incident response
 
 | Symptom | Action |

@@ -91,7 +91,7 @@ The supervisor **only decides**; it never executes tools itself.
 | Gmail / Calendar (NATASHA) | ⛔ | SEAM: Google OAuth; reads SAFE, sends RESTRICTED→approval. |
 | LLM reasoning (VISION, DR. STRANGE, QUICKSILVER, NICK FURY) | ⛔ | SEAM: inject a configured `LLMProvider`. |
 | GUI automation (keyboard / mouse / screen) | ⛔ | Validator treats these as RESTRICTED→approval; executor not wired. |
-| MFA / passkeys | ⛔ | Password-only login today — the biggest security gap for internet exposure. |
+| MFA (TOTP) + step-up on high-risk approvals | ✅ | Opt-in TOTP second factor (RFC 6238, stdlib), encrypted secret, one-time recovery codes; high-risk grants require fresh step-up. Passkeys/WebAuthn still future. |
 | TLS termination | ⛔ | Terminate in front (LB / Caddy / Traefik); app sets Secure cookies + HSTS in prod. |
 
 ## 6. Roadmap to production (ordered)
@@ -125,10 +125,26 @@ Each phase is independently shippable. Earlier phases are prerequisites for late
 - **Rule:** every integration goes through propose → approve → execute. No shortcuts.
 - **Exit:** a research request and a "send email" request both run the full approval path.
 
-### Phase 4 — Auth hardening for exposure
-- Add TOTP or WebAuthn MFA.
-- Step-up re-auth on high-risk approvals.
-- **Exit:** login requires a second factor; approving a DANGEROUS-adjacent action re-prompts.
+### Phase 4 — Auth hardening for exposure ✅ done (TOTP; WebAuthn deferred)
+- [x] TOTP MFA (RFC 6238, stdlib implementation — no external dependency at runtime). Opt-in per
+  admin: enroll → confirm a code → MFA enabled; secret field-encrypted at rest, never returned
+  after confirmation. Ten one-time recovery codes shown once, stored as argon2 hashes.
+- [x] MFA login is two-step: password returns an `mfa_pending` challenge (a distinct token type
+  rejected by every protected route); a code redeems it for real tokens. The three login rate
+  limits apply to the code step; constant-time compare; replayed TOTP in the same step rejected.
+- [x] Disable requires password **and** a valid second factor (never password alone).
+- [x] Step-up re-auth on high-risk GRANTs: a DANGEROUS grant by an MFA admin needs a fresh code
+  (inline or a recent session step-up within `JARVIS_STEP_UP_WINDOW_SECONDS`). Threshold is
+  configurable (`JARVIS_APPROVAL_STEP_UP_RISK`); `JARVIS_APPROVAL_REQUIRE_MFA` can require MFA.
+- [x] Dashboard: login code entry, enroll/disable screens (QR URI + secret + one-time recovery
+  codes), and a step-up prompt on high-risk approvals — all CSP-compliant (no inline script/CDN).
+- [x] CLI `enroll-mfa --username`; prod `check-config`/status warns (never blocks) when no admin
+  has MFA. Config: `JARVIS_MFA_ISSUER`, `JARVIS_MFA_RECOVERY_CODES`, `JARVIS_STEP_UP_WINDOW_SECONDS`.
+- **Exit:** an MFA login requires a second factor; a DANGEROUS approval re-prompts. ✅
+- WebAuthn/passkeys remain future work.
+- **Note (no Alembic yet):** schema changes are picked up on fresh databases via `create_all`.
+  Existing production databases need a one-time manual `ALTER TABLE` (see OPERATIONS.md) until
+  Phase 5 adds migrations.
 
 ### Phase 5 — Deploy for real
 - **Add Alembic migrations.** Today `create_schema()` is `create_all` only — fine for a first

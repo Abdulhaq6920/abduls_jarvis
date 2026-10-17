@@ -1,5 +1,5 @@
 // Approvals: the human gate. Shows exactly what will run before anything is granted.
-import { api } from '../api.js';
+import { ApiError, api } from '../api.js';
 import { clear, clock, el, pretty, timeAgo, toast } from '../dom.js';
 
 const TONE = { PENDING: 'warn', GRANTED: 'info', EXECUTING: 'info', EXECUTED: 'ok', FAILED: 'danger', DENIED: 'mute', EXPIRED: 'mute' };
@@ -36,9 +36,19 @@ export function mountApprovals(root, ctx) {
       el('button', { class: 'btn ok', type: 'button', onClick: () => decide(a, true) }, 'Approve'),
       el('button', { class: 'btn danger', type: 'button', onClick: () => decide(a, false) }, 'Deny')));
 
-  async function decide(a, granted) {
-    try { await api(`/api/approvals/${a.id}/decision`, { method: 'POST', body: { granted } }); toast(granted ? 'Approved' : 'Denied', granted ? 'ok' : ''); }
-    catch (e) { toast(e.message, 'error'); }
+  async function decide(a, granted, code) {
+    try {
+      await api(`/api/approvals/${a.id}/decision`, { method: 'POST', body: code ? { granted, code } : { granted } });
+      toast(granted ? 'Approved' : 'Denied', granted ? 'ok' : '');
+    } catch (e) {
+      // A high-risk grant needs a fresh second factor. Ask for a code once and retry.
+      if (granted && !code && e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        const entered = window.prompt('This is a high-risk action. Enter your authenticator code (or a recovery code) to approve:');
+        if (entered) { await decide(a, true, entered.trim()); return; }
+        toast('Approval needs a second factor.', 'error'); await load(); return;
+      }
+      toast(e.message, 'error');
+    }
     await load();
   }
 

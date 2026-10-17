@@ -63,11 +63,24 @@ a path outside your allow-list, a malformed request). That is tested.
 
 Being clear about gaps matters more than the list above.
 
-* **No MFA / passkeys.** Login is a password only. For a single owner on a private network this
-  is reasonable; for anything internet-facing, add TOTP or WebAuthn. *Biggest remaining gap.*
-* **Approvals are not step-up authenticated.** Anyone holding a live admin session can approve.
-  The 15-minute token and XSS hardening limit exposure, but a re-prompt for the password on
-  high-risk approvals would be stronger.
+* **TOTP MFA is available (opt-in per admin).** An admin can enroll a TOTP second factor
+  (RFC 6238; works with Google Authenticator, Authy, Microsoft Authenticator). The secret is
+  field-encrypted at rest and never returned after confirmation; enabling MFA mints ten
+  one-time recovery codes shown once and stored only as argon2 hashes. With MFA on, a password
+  alone yields an `mfa_pending` challenge (a distinct token type that cannot authenticate any
+  protected route) — real tokens are issued only after a valid code. The code step reuses the
+  three login rate limits, compares in constant time, and rejects a TOTP replayed within the
+  same 30-second step. Accounts without MFA keep single-step login. WebAuthn/passkeys are still
+  future work.
+* **High-risk approvals are step-up authenticated.** When an admin with MFA GRANTs a high-risk
+  approval (DANGEROUS by default; also RESTRICTED when `JARVIS_APPROVAL_STEP_UP_RISK=RESTRICTED`),
+  a fresh second factor is required — either a code supplied with the decision or a recent
+  `step_up` on the session (within `JARVIS_STEP_UP_WINDOW_SECONDS`, default 300). A stolen live
+  admin session alone cannot approve a DANGEROUS action. Step-up only *adds* a gate: a grant
+  never unlocks a hard block, and separation of duties is intact (the agent/device role is still
+  403 on the decision route). An admin without MFA keeps today's behaviour with an audited
+  warning; `JARVIS_APPROVAL_REQUIRE_MFA=true` hardens this to a denial. Any ambiguity fails
+  closed (denies).
 * **TLS is not terminated by this repo.** The compose stack speaks plain HTTP on 8080. Put it
   behind a TLS-terminating proxy/load balancer. The app sets `Secure` cookies and HSTS in prod.
 * **Encryption keys live in process memory and the secrets directory.** This defends a stolen

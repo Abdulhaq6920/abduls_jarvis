@@ -29,6 +29,10 @@ class ApprovalOut(_ORM):
 
 class ApprovalDecision(BaseModel):
     granted: bool
+    # Optional second-factor code supplied inline when granting a high-risk approval, so a
+    # fresh step-up can be proven in the same request. Ignored for a denial.
+    code: Optional[str] = Field(default=None, min_length=6, max_length=14,
+                                pattern=r"^[0-9A-Za-z\-]{6,14}$")
 
 
 class ApprovalResult(BaseModel):
