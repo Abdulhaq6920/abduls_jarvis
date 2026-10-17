@@ -8,9 +8,9 @@ import os
 
 import pytest
 from cryptography.fernet import Fernet
+from jarvis_backend.auth.passwords import hash_password
 from jarvis_backend.config import Settings
 from jarvis_backend.crypto import FieldCipher, set_cipher
-from jarvis_backend.auth.passwords import hash_password
 from jarvis_backend.storage import (
     ApprovalStore,
     AuditLog,

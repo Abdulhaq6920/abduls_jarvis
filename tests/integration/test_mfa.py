@@ -1,7 +1,7 @@
 """TOTP MFA + step-up re-auth, exercised through the real HTTP stack."""
 from jarvis_backend.auth import totp
 
-from tests.conftest import ADMIN_PASSWORD, ADMIN_USER, bearer, login
+from tests.conftest import ADMIN_PASSWORD, ADMIN_USER, bearer
 
 
 def _code(secret: str) -> str:

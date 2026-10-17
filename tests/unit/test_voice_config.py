@@ -5,7 +5,6 @@ vosk import stays lazy, so no model download or audio hardware is needed here.
 """
 import json
 
-import pytest
 from jarvis_local_agent.config import RuntimeConfig
 
 

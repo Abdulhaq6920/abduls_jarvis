@@ -85,8 +85,14 @@ Two `Router` implementations, same async `route()` Protocol. Precedence is one c
    model is never consulted for it.
 2. `LLMRouter` (default, `JARVIS_ROUTER=llm`) asks the `LLMProvider` to pick one agent from a
    menu derived from the live roster — this is what makes a natural phrasing route itself.
+   A reply is accepted when it leads with a roster id, or when exactly one roster id appears
+   in it; a reply naming several agents ("not TONY, VISION should ...") is ambiguous and is
+   refused rather than guessed. The call has its own short timeout / tiny token cap
+   (`JARVIS_ROUTER_TIMEOUT_SECONDS`, `JARVIS_ROUTER_MAX_TOKENS`) because it runs *before* the
+   agent's own call.
 3. `KeywordRouter` scores whole-word `routing_keywords` (tolerates simple plural/verb endings).
-   It is the fallback for *every* LLM failure path, and the short-circuit for `EchoLLM`.
+   It is the fallback for *every* LLM failure path, and the short-circuit for `EchoLLM` and
+   for an empty utterance.
 4. Otherwise **JARVIS** answers directly.
 
 `strip_wake_word()` removes the "hey/hi/ok jarvis" preamble first. `route()` never raises, so a

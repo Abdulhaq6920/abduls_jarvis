@@ -104,11 +104,30 @@ usefully:
 | Remembered notes | `context["memories"]` | first 3, 160 chars each |
 | Recent conversation | `context["history"]` | last 3 turns, 80 chars/side |
 
+**Routing widens that boundary.** With `JARVIS_ROUTER=llm` (the default) and a hosted
+provider, the router makes its own call *before* an agent is chosen, so the table above is not
+the whole picture:
+
+| Field | Source | Bound sent to the provider |
+| --- | --- | --- |
+| The request itself | the utterance, wake word stripped | every request that does not name an agent |
+| Agent menu | `id`, `role`, `routing_keywords` of the live roster | no user data |
+
+That call sends the raw request text for agents that otherwise never touch a provider —
+FRIDAY, TONY, NATASHA, WONG and JARVIS are deterministic and LLM-free, yet their utterances
+are classified by the model. A *"remember that ..."* fact for WONG is the sharpest case: it is
+Fernet-encrypted at rest, and with hosted routing the utterance carrying it crosses the wire
+for the routing decision. Three ways to avoid it: keep `JARVIS_ROUTER=keyword`, keep the
+`echo` provider (the router short-circuits before any call), or point `JARVIS_LLM_BASE_URL` at
+a local Ollama. An explicit "ask TONY to ..." is resolved locally and never sent either way.
+
 With the default `EchoLLM` nothing leaves the machine. With a hosted provider this context
 is transmitted to that provider, so point `JARVIS_LLM_BASE_URL` only at an endpoint you trust
 with it. A fully offline deployment should use Ollama (`http://localhost:11434/v1`) or keep
 the `echo` default. The fields are deliberately bounded and truncated; none include raw file
-contents, secrets, or tool output — only names, short notes, and short reply snippets.
+contents, secrets, or tool output — only names, short notes, and short reply snippets. The
+utterance and the reply are never written to the logs on any path, including failures (those
+log the error class only).
 
 **Error policy:** `OpenAICompatibleLLM.complete` never raises. On any transport, HTTP-status,
 JSON or shape error (including a successful response whose `message.content` is not a string)
@@ -146,10 +165,18 @@ is unaffected.
 
 The fallback chain is strict: **explicit `ask <agent> to ...` → LLM → keywords → JARVIS.**
 An explicitly named agent always wins and is never sent to the model. `LLMRouter.route`
-never raises (same policy as the provider): an unreachable model, an unparsable reply or a
-name that is not on the roster all degrade to keyword routing, and the PLAN stage records
-which path was taken. `EchoLLM` is short-circuited **before** any call, so the dev/test
-default is exactly the deterministic keyword behaviour.
+never raises (same policy as the provider): an unreachable model, the provider's own offline
+fallback sentence, a reply that names no roster agent *or names several* (a preamble like
+"the JARVIS router would send this to VISION" is ambiguous, so it is refused rather than
+guessed) all degrade to keyword routing, log a warning, and the PLAN stage records which path
+was taken. `EchoLLM` is short-circuited **before** any call, so the dev/test default is
+exactly the deterministic keyword behaviour, PLAN reason included; an empty utterance (a bare
+wake word, a blank STT result) skips the call too.
+
+The routing call has its own budget, `JARVIS_ROUTER_TIMEOUT_SECONDS` /
+`JARVIS_ROUTER_MAX_TOKENS`, not the agent's: it is serialized ahead of the agent's own call,
+so a stalled provider must not be able to burn the full `JARVIS_LLM_TIMEOUT_SECONDS` before
+keyword routing takes over.
 
 Routing only decides *who answers*; the chosen agent's `ToolRequest`s still pass the policy
 gate and the local validator unchanged.
@@ -157,6 +184,8 @@ gate and the local validator unchanged.
 | Env | Default | Effect |
 | --- | --- | --- |
 | `JARVIS_ROUTER` | `llm` | `llm` \| `keyword`. `llm` falls back to keywords whenever the model is unavailable or unsure (always, with the `echo` provider). |
+| `JARVIS_ROUTER_TIMEOUT_SECONDS` | `5` | Timeout for the routing call only. |
+| `JARVIS_ROUTER_MAX_TOKENS` | `16` | Token cap for the routing call only (it answers with one id). |
 
 ## Web search — `SearchProvider`
 

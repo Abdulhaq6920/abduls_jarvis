@@ -28,8 +28,8 @@ from jarvis_backend.agents.registry import AgentConfig, AgentRegistry
 from jarvis_backend.agents.runtime import AgentOutcome, AgentServices, build_agent
 from jarvis_backend.core.llm import LLMProvider
 from jarvis_backend.core.policy import PolicyEngine, describe_request
-from jarvis_backend.core.search import SearchProvider
 from jarvis_backend.core.router import RouteDecision, Router
+from jarvis_backend.core.search import SearchProvider
 from jarvis_backend.events import EventBus
 from jarvis_backend.storage import ApprovalStore, AuditLog, MemoryStore, TurnStore
 

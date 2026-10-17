@@ -11,13 +11,13 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from jarvis_shared.security import RiskLevel
 
 from jarvis_backend.api.deps import get_container
 from jarvis_backend.auth.deps import ADMIN, AGENT, admin_only, agent_only, any_role, require_role
 from jarvis_backend.auth.service import Principal
 from jarvis_backend.container import Container
 from jarvis_backend.schemas import ApprovalDecision, ApprovalOut, ApprovalResult
-from jarvis_shared.security import RiskLevel
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 

@@ -23,7 +23,9 @@ log = get_logger(__name__)
 
 # Honest, spoken-friendly fallback when the model cannot be reached. Never a fabricated
 # answer -- the agent says it could not reach the model rather than inventing a response.
-_FALLBACK = "I couldn't reach the language model just now, so I don't have an answer for that."
+# Public because ``complete`` never raises: callers that need to tell "the model answered"
+# from "the model is down" (the router) compare the reply against this sentence.
+FALLBACK_REPLY = "I couldn't reach the language model just now, so I don't have an answer for that."
 
 # Hosts a plaintext http:// base URL may legitimately use (a local Ollama server). Any other
 # host over http:// is refused: the prompt and bounded local context (and a Bearer key, if
@@ -114,7 +116,7 @@ class OpenAICompatibleLLM:
             # Refuse to send the prompt (and any Bearer key) over plaintext to a remote
             # host (config validation flags this too). Nothing leaves the process.
             log.warning("llm request refused: plaintext http to a remote host")
-            return _FALLBACK
+            return FALLBACK_REPLY
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -142,16 +144,26 @@ class OpenAICompatibleLLM:
                 ValueError) as exc:
             # Log the class/message only -- never the payload or the key.
             log.warning("llm request failed", extra={"error": type(exc).__name__})
-            return _FALLBACK
-        return text or _FALLBACK
+            return FALLBACK_REPLY
+        return text or FALLBACK_REPLY
 
 
-def build_llm(settings: Settings) -> LLMProvider:
+def build_llm(
+    settings: Settings,
+    *,
+    timeout: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> LLMProvider:
     """Return the configured provider.
 
     ``EchoLLM`` for the default ``provider="echo"`` and for a real provider that has no
     usable base URL (so a half-configured prod env degrades to the safe offline default
     rather than failing). Otherwise an :class:`OpenAICompatibleLLM`.
+
+    ``timeout``/``max_tokens`` override the agent budget for a caller whose call is not an
+    agent answer. The router uses them: its classification returns one agent id and is made
+    *before* the agent's own call, so it must not be able to burn the full agent timeout
+    ahead of the first spoken word.
     """
     if settings.llm_provider == "echo" or not settings.llm_base_url_value:
         return EchoLLM()
@@ -159,6 +171,6 @@ def build_llm(settings: Settings) -> LLMProvider:
         model=settings.llm_model,
         base_url=settings.llm_base_url_value,
         api_key=settings.secret("llm_api_key") or None,
-        timeout=settings.llm_timeout_seconds,
-        max_tokens=settings.llm_max_tokens,
+        timeout=settings.llm_timeout_seconds if timeout is None else timeout,
+        max_tokens=settings.llm_max_tokens if max_tokens is None else max_tokens,
     )

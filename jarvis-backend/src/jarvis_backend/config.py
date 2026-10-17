@@ -156,6 +156,12 @@ class Settings(BaseSettings):
     # dev/test behaviour is unchanged until a real model is configured. "keyword" pins the
     # deterministic router even when a model IS configured.
     router: Literal["keyword", "llm"] = "llm"
+    # The routing call is its own, much smaller budget: it is serialized AHEAD of the
+    # agent's call and answers with a single agent id, so it gets seconds (not the 30s agent
+    # timeout) and a handful of tokens. A stalled provider therefore cannot delay the first
+    # spoken word by the full llm_timeout_seconds before keyword routing takes over.
+    router_timeout_seconds: float = 5.0
+    router_max_tokens: int = 16
 
     # --- search --------------------------------------------------------------------
     # Which web-search engine SHURI's research uses. "none" is the disabled default used in

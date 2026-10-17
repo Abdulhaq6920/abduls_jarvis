@@ -29,7 +29,9 @@ ignore = [
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.Body"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106", "B011", "S108", "B007"]
+# S105/S106/S107: test fixtures legitimately hardcode throwaway passwords (incl. as
+# function defaults, which is S107) -- they are not credentials.
+"tests/**" = ["S105", "S106", "S107", "B011", "S108", "B007"]
 # Audio/window teardown is best-effort BY DESIGN: if closing a microphone stream or a Tk window
 # fails while shutting down, there is nothing useful to do and raising would mask the real exit
 # reason. These four files are the only exemption from S110; security-relevant code is not here.

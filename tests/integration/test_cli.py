@@ -299,9 +299,9 @@ def test_migrate_fresh_db_builds_a_working_schema(workdir):
     """A `migrate` on an empty data dir yields a schema that supports an insert+select."""
     import asyncio
 
+    from jarvis_backend.auth.passwords import hash_password
     from jarvis_backend.config import get_settings
     from jarvis_backend.container import Container
-    from jarvis_backend.auth.passwords import hash_password
     _seed_secrets(workdir)
 
     assert main(["migrate"]) == 0

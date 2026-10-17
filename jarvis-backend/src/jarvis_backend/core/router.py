@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, List, Optional, Protocol
 from jarvis_shared.agents import AgentId, AgentSpec
 from jarvis_shared.log import get_logger
 
-from jarvis_backend.core.llm import EchoLLM, LLMMessage, LLMProvider
+from jarvis_backend.core.llm import FALLBACK_REPLY, EchoLLM, LLMMessage, LLMProvider
 
 if TYPE_CHECKING:
     from jarvis_backend.config import Settings
@@ -49,9 +49,6 @@ _EXPLICIT = re.compile(
 )
 _WAKE_PREFIX = re.compile(r"^\s*(hey|hi|ok|okay)\s+jarvis[,.!:]?\s*", re.IGNORECASE)
 
-# How many keywords per agent go into the LLM's menu -- enough to describe the lane, short
-# enough to keep the prompt small and the decision fast.
-_MENU_KEYWORDS = 6
 _ROUTER_SYSTEM = (
     "You are the request router of the JARVIS assistant. Pick the ONE agent best suited to "
     "handle the user's request. Answer with that agent's id and nothing else. If no "
@@ -130,13 +127,16 @@ class LLMRouter:
 
     Error policy mirrors :mod:`jarvis_backend.core.llm`: ``route`` NEVER raises.
     ``Supervisor._plan`` has no try/except around it, so a raised exception would 500 the
-    ``/assist`` request. Every failure path -- an offline provider, a transport error, a
-    reply that names no known agent -- degrades to :class:`KeywordRouter`, and the reason
-    recorded in the PLAN stage says which path was taken.
+    ``/assist`` request. Every failure path -- an offline provider, a transport error, the
+    provider's own honest fallback sentence, a reply that names no agent or names several --
+    degrades to :class:`KeywordRouter`, logs a warning, and records in the PLAN reason which
+    path was taken.
 
     ``EchoLLM`` (the dev/test default) is short-circuited BEFORE any call: it echoes the
     prompt back and could never name an agent, so dev, tests and offline installs keep
-    exactly the deterministic keyword behaviour.
+    exactly the deterministic keyword behaviour -- including the PLAN reason, which is not
+    annotated for that short-circuit. An empty utterance (a bare wake word, a blank STT
+    result) skips the call too: there is nothing to classify.
 
     Privacy: the utterance is sent to the configured provider (that is the point) but is
     never logged. Failures log the exception class only.
@@ -154,7 +154,15 @@ class LLMRouter:
             return explicit
 
         if isinstance(self._llm, EchoLLM):
-            return self._fallback(utterance, agents, "no language model configured")
+            # The dev/test/offline default. No annotation: the pure keyword path is what
+            # ran, so the trace reads exactly as it did before this router existed.
+            return self._fallback(utterance, agents, None)
+
+        if not text:
+            # A bare wake word ("Hey JARVIS") or an empty STT result strips to "". There is
+            # nothing to classify, so skip the model call entirely: prompting it with an
+            # empty request would route to an arbitrary specialist with an empty task.
+            return self._fallback(utterance, agents, "nothing to classify")
 
         try:
             reply = await self._llm.complete(self._prompt(text, agents))
@@ -163,23 +171,45 @@ class LLMRouter:
             log.warning("llm routing failed", extra={"error": type(exc).__name__})
             return self._fallback(utterance, agents, "language model unavailable")
 
+        if reply.strip() == FALLBACK_REPLY:
+            # The shipped provider never raises either: on a transport, status or shape
+            # error it logs and returns this exact sentence. Without this check a real
+            # outage would be diagnosed as an unusable reply, and the only trace of a down
+            # model would be a per-request PLAN reason.
+            log.warning("llm routing unavailable: provider returned its offline fallback")
+            return self._fallback(utterance, agents, "language model unavailable")
+
         agent_id = _parse_agent(reply, agents)
         if agent_id is None:
+            # Logged without the reply: a model that ignores the instruction can echo the
+            # utterance back, and the utterance never reaches the logs. The rate of these
+            # lines is the signal that routing is degraded.
+            log.warning("llm routing gave no usable agent")
             return self._fallback(utterance, agents, "language model gave no usable agent")
         return RouteDecision(agent_id, False, f"LLM routed to {agent_id.value}.", text)
 
-    def _fallback(self, utterance: str, agents: List[AgentSpec], why: str) -> RouteDecision:
+    def _fallback(self, utterance: str, agents: List[AgentSpec],
+                  why: Optional[str]) -> RouteDecision:
+        """The keyword decision, annotated with why the model did not make it.
+
+        ``why=None`` keeps the keyword reason verbatim. It is used for the ``EchoLLM``
+        short-circuit, where a suffix would sit in the user-visible PLAN reason of every
+        request a default or offline install ever makes.
+        """
         decision = self._keyword.decide(utterance, agents)
+        if why is None:
+            return decision
         return RouteDecision(decision.agent_id, decision.explicit,
                              f"{decision.reason} (keyword fallback: {why})", decision.task)
 
     @staticmethod
     def _prompt(task: str, agents: List[AgentSpec]) -> List[LLMMessage]:
-        # The menu is derived from the passed-in specs, so a newly registered agent is
-        # routable without touching this prompt.
+        # The menu is derived from the passed-in specs -- every id and EVERY routing keyword
+        # they declare -- so a new agent (or a new keyword on an existing one) is routable
+        # without touching this prompt. Truncating the keyword lists would hide lanes the
+        # keyword fallback still honours, i.e. make the two layers disagree.
         menu = "\n".join(
-            f"{spec.id.value} - {spec.role} - keywords: "
-            f"{', '.join(spec.routing_keywords[:_MENU_KEYWORDS])}"
+            f"{spec.id.value} - {spec.role} - keywords: {', '.join(spec.routing_keywords)}"
             for spec in agents
         )
         return [
@@ -189,25 +219,52 @@ class LLMRouter:
 
 
 def _parse_agent(reply: str, agents: List[AgentSpec]) -> Optional[AgentId]:
-    """Find the first known agent id in a model reply, or None.
+    """Resolve a model reply to exactly one roster agent id, or None.
 
-    Tolerant on purpose: a small model answers "VISION", "vision.", "Agent: NICK FURY" or
-    "I'd route this to SHURI". Only ids from the passed-in roster are accepted, so a
-    hallucinated name degrades to the keyword fallback instead of a KeyError.
+    The prompt asks for the bare id, so the reply is read in order of decreasing certainty:
+
+    1. the reply STARTS WITH an id -- "VISION", "vision.", "DR_STRANGE", and also
+       "VISION - best suited to analyse data" where the model answered then explained;
+    2. otherwise exactly ONE distinct roster id appears anywhere -- "I'd route this to
+       SHURI", "Agent: NICK FURY";
+    3. anything else returns None so the caller degrades to keyword routing.
+
+    Case 3 is the important one. Taking the earliest (or latest) id in a reply that names
+    SEVERAL agents silently misroutes and still looks like a success: "The JARVIS router
+    would send this to VISION" and "Not TONY, VISION should analyse it" both resolve to the
+    wrong agent that way. A reply naming more than one agent is genuinely ambiguous, so we
+    refuse to guess and fall back to the deterministic router instead.
+
+    Only ids from the passed-in roster are accepted, so a hallucinated name degrades to the
+    fallback rather than raising.
     """
     if not reply or not reply.strip():
         return None
-    # Collapse punctuation to single spaces (and pad the ends) so a whole-token match is a
-    # plain " TOKEN " search: "Dr. Strange", "nick fury" and "DR_STRANGE" all normalise to
-    # the enum spelling, while "ULTRONS" or "VISIONARY" cannot match.
-    normalised = f" {re.sub(r'[^A-Z0-9]+', ' ', reply.upper()).strip()} "
-    found: Optional[tuple[int, AgentId]] = None
-    for spec in agents:
-        token = r"\s+".join(re.escape(part) for part in spec.id.value.split("_"))
-        hit = re.search(rf"\s{token}\s", normalised)
-        if hit and (found is None or hit.start() < found[0]):
-            found = (hit.start(), spec.id)
-    return found[1] if found else None
+
+    def _norm(text: str) -> str:
+        # Collapse anything that is not A-Z0-9 to single spaces so "Dr. Strange",
+        # "nick fury" and "DR_STRANGE" all normalise to the enum spelling.
+        return re.sub(r"[^A-Z0-9]+", " ", text.upper()).strip()
+
+    # id (normalised, e.g. "DR STRANGE") -> AgentId, longest first so "NICK FURY" is
+    # preferred over a bare "FURY"-style prefix when both could match.
+    by_id = {_norm(spec.id.value): spec.id for spec in agents}
+    ordered = sorted(by_id, key=len, reverse=True)
+
+    # 1. The reply leads with the id (the expected, highest-confidence shape).
+    head = _norm(reply.splitlines()[0])
+    for candidate in ordered:
+        if head == candidate or head.startswith(f"{candidate} "):
+            return by_id[candidate]
+
+    # 2. Exactly one distinct roster id anywhere in the reply.
+    padded = f" {_norm(reply)} "
+    hits = {by_id[c] for c in ordered if re.search(rf"\s{re.escape(c)}\s", padded)}
+    if len(hits) == 1:
+        return next(iter(hits))
+
+    # 3. Nothing, or several agents named -> ambiguous, let the keyword router decide.
+    return None
 
 
 def build_router(settings: Settings, llm: LLMProvider) -> Router:

@@ -56,7 +56,7 @@ def _token_out(issued: IssuedTokens) -> TokenOut:
 
 @router.post("/login", response_model=None)
 async def login(body: LoginIn, request: Request, response: Response,
-                c: Container = Depends(get_container)) -> "TokenOut | MfaRequiredOut":
+                c: Container = Depends(get_container)) -> TokenOut | MfaRequiredOut:
     """Password login. For an MFA account this returns an ``mfa_required`` challenge (no
     tokens, no refresh cookie); the caller then posts to ``/mfa/login`` with a code."""
     issued = await c.auth.login(body.username, body.password, client_ip(request),

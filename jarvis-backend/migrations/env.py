@@ -10,10 +10,9 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
-
 from jarvis_backend.config import get_settings
 from jarvis_backend.storage.models import Base
+from sqlalchemy import engine_from_config, pool
 
 # Alembic Config object (reads values from alembic.ini).
 config = context.config

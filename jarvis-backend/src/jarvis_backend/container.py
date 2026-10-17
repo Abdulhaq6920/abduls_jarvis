@@ -17,8 +17,8 @@ from jarvis_backend.cache import Cache, build_cache
 from jarvis_backend.config import Settings
 from jarvis_backend.core.llm import build_llm
 from jarvis_backend.core.policy import PolicyEngine
-from jarvis_backend.core.search import build_search
 from jarvis_backend.core.router import build_router
+from jarvis_backend.core.search import build_search
 from jarvis_backend.core.supervisor import Supervisor
 from jarvis_backend.crypto import FieldCipher, set_cipher
 from jarvis_backend.events import EventBus, build_bus
@@ -101,10 +101,15 @@ class Container:
         registry = AgentRegistry()
         agent_config = AgentConfig(AgentSettingsStore(db), cache)
         policy = PolicyEngine()
-        # One provider instance serves both the reasoning agents and the router.
+        # The reasoning agents and the router share a provider configuration but not a
+        # budget: the routing call returns a single agent id and runs AHEAD of the agent's
+        # own call, so it gets router_timeout_seconds / router_max_tokens instead of the
+        # full agent allowance. Both are stateless (one HTTP client per request).
         llm = build_llm(settings)
+        router_llm = build_llm(settings, timeout=settings.router_timeout_seconds,
+                               max_tokens=settings.router_max_tokens)
         supervisor = Supervisor(
-            registry=registry, config=agent_config, router=build_router(settings, llm),
+            registry=registry, config=agent_config, router=build_router(settings, router_llm),
             policy=policy, approvals=approvals, audit=audit, turns=turns, memory=memory,
             bus=bus, llm=llm, search=build_search(settings),
             history_turns=settings.history_turns,

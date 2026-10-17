@@ -91,6 +91,24 @@ async def test_provider_omits_authorization_header_without_a_key(monkeypatch):
     assert "authorization" not in {k.lower() for k in captured["request"].headers}
 
 
+async def test_build_llm_budget_overrides_apply(monkeypatch):
+    # The router's classification is serialized AHEAD of the agent's own call, so it is
+    # built with a short timeout and a tiny token cap instead of the agent allowance.
+    import json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "VISION"}}]})
+
+    captured = _mock_client(monkeypatch, handler)
+    s = Settings(env="dev", llm_provider="ollama", llm_base_url="http://localhost:11434/v1")
+    llm = build_llm(s, timeout=s.router_timeout_seconds, max_tokens=s.router_max_tokens)
+    await llm.complete([LLMMessage(role="user", content="hi")])
+
+    assert s.router_max_tokens < s.llm_max_tokens and s.router_timeout_seconds < s.llm_timeout_seconds
+    assert json.loads(captured["request"].content)["max_tokens"] == s.router_max_tokens
+    assert captured["request"].extensions["timeout"]["connect"] == s.router_timeout_seconds
+
+
 async def test_provider_falls_back_on_http_status_error(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})

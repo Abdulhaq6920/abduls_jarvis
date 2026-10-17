@@ -93,7 +93,7 @@ def ensure_sqlite_columns(conn: Connection) -> list[str]:
     return added
 
 
-async def ensure_additive_columns(db: "Database") -> list[str]:
+async def ensure_additive_columns(db: Database) -> list[str]:
     """Async wrapper: no-op on non-SQLite; runs the additive backfill on SQLite.
 
     Postgres migrations go through alembic, so this only ever touches SQLite. Returns the

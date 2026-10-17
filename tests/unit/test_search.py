@@ -63,7 +63,6 @@ def _mock_client(monkeypatch, handler):
 
 
 async def test_provider_parses_ddg_body_into_capped_results(monkeypatch):
-    import json as _json
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_DDG_BODY)

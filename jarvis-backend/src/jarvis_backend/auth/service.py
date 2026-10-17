@@ -107,7 +107,7 @@ class AuthService:
 
     # ----------------------------------------------------------------------- login
     async def login(self, username: str, password: str, ip: str,
-                    user_agent: str) -> "IssuedTokens | MfaRequired":
+                    user_agent: str) -> IssuedTokens | MfaRequired:
         name = username.strip().lower()[:64]
         pair_key = await self._enforce_login_limits(name, ip)
 

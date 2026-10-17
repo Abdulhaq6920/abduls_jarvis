@@ -1,6 +1,5 @@
 """Unit tests for the stdlib RFC 6238 TOTP module and the special token kinds."""
 import pytest
-
 from jarvis_backend.auth import totp
 from jarvis_backend.auth.tokens import ACCESS, MFA_PENDING, TokenCodec, TokenError
 
