@@ -114,10 +114,14 @@ class VoiceApp:
     # -------------------------------------------------------------------- runtime
     async def _arun(self) -> None:
         wake = VoskWakeWordEngine(self.config.wake_phrase,
-                                  self.config.wake_sensitivity, mic=self.mic)
-        stt = VoskSTTProvider(self.mic)
+                                  self.config.wake_sensitivity, mic=self.mic,
+                                  vosk_model_lang=self.config.vosk_model_lang,
+                                  vosk_model_path=self.config.vosk_model_path)
+        stt = VoskSTTProvider(self.mic,
+                              vosk_model_lang=self.config.vosk_model_lang,
+                              vosk_model_path=self.config.vosk_model_path)
         try:
-            tts = SapiTTSProvider()
+            tts = SapiTTSProvider(self.config.tts_voice_hint)
         except Exception as exc:
             print(f"[warn] SAPI TTS unavailable ({exc}); falling back to console.")
             from jarvis_local_agent.tts import DevTTSProvider

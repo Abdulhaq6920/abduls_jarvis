@@ -116,18 +116,26 @@ class MicStream:
 # --------------------------------------------------------------------------------
 # Shared Vosk model (loaded once; ~40MB)
 # --------------------------------------------------------------------------------
-_MODEL = None
+_MODELS: dict = {}
 _MODEL_LOCK = threading.Lock()
 
 
-def get_model():
-    global _MODEL
+def get_model(lang: str = "en-us", model_path: str = ""):
+    """Load (and cache) a Vosk model, keyed by (lang, model_path).
+
+    An explicit ``model_path`` points at a downloaded model directory (e.g. a non-English
+    model); otherwise the bundled ``lang`` code is used. The vosk import stays lazy inside
+    this function so importing the module has no side effects.
+    """
+    key = (lang, model_path)
     with _MODEL_LOCK:
-        if _MODEL is None:
+        model = _MODELS.get(key)
+        if model is None:
             import vosk
             vosk.SetLogLevel(-1)
-            _MODEL = vosk.Model(lang="en-us")
-        return _MODEL
+            model = vosk.Model(model_path=model_path) if model_path else vosk.Model(lang=lang)
+            _MODELS[key] = model
+        return model
 
 
 # --------------------------------------------------------------------------------
@@ -143,10 +151,13 @@ class VoskWakeWordEngine:
     """
 
     def __init__(self, wake_phrase: str = "hey jarvis", sensitivity: float = 0.5,
-                 mic: Optional[MicStream] = None) -> None:
+                 mic: Optional[MicStream] = None, vosk_model_lang: str = "en-us",
+                 vosk_model_path: str = "") -> None:
         self.wake_phrase = wake_phrase.lower().strip()
         self.sensitivity = max(0.0, min(1.0, sensitivity))
         self.mic = mic or MicStream()
+        self.vosk_model_lang = vosk_model_lang
+        self.vosk_model_path = vosk_model_path
         self._paused = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -187,13 +198,19 @@ class VoskWakeWordEngine:
         self._thread.start()
 
     def _grammar(self) -> str:
-        words = [self.wake_phrase, "jarvis", "hey jarvis", "[unk]"]
+        # Derive the restricted grammar from the configured wake phrase: the full phrase,
+        # each of its words, and the unknown-token marker. A custom phrase like "ok jarvis"
+        # yields its own tokens rather than hardcoded English ones.
+        words = [self.wake_phrase, *self.wake_phrase.split(), "[unk]"]
         return json.dumps(sorted(set(words)))
+
+    def _model(self):
+        return get_model(self.vosk_model_lang, self.vosk_model_path)
 
     def _loop(self) -> None:
         from vosk import KaldiRecognizer
 
-        rec = KaldiRecognizer(get_model(), SAMPLE_RATE, self._grammar())
+        rec = KaldiRecognizer(self._model(), SAMPLE_RATE, self._grammar())
         rec.SetWords(False)
 
         while not self._stop.is_set():
@@ -220,11 +237,11 @@ class VoskWakeWordEngine:
                 if self._level_peak < self.min_level:
                     # Grammar matched near-silence -> almost certainly a false
                     # positive. Reset and keep listening.
-                    rec = KaldiRecognizer(get_model(), SAMPLE_RATE, self._grammar())
+                    rec = KaldiRecognizer(self._model(), SAMPLE_RATE, self._grammar())
                     continue
                 self._last_fire = now
                 self._level_peak = 0.0
-                rec = KaldiRecognizer(get_model(), SAMPLE_RATE, self._grammar())
+                rec = KaldiRecognizer(self._model(), SAMPLE_RATE, self._grammar())
                 if self._on_wake:
                     self._on_wake()
 
@@ -265,16 +282,19 @@ class VoskSTTProvider:
     """
 
     def __init__(self, mic: MicStream, max_seconds: float = 12.0,
-                 silence_seconds: float = 1.4) -> None:
+                 silence_seconds: float = 1.4, vosk_model_lang: str = "en-us",
+                 vosk_model_path: str = "") -> None:
         self.mic = mic
         self.max_seconds = max_seconds
         self.silence_seconds = silence_seconds
+        self.vosk_model_lang = vosk_model_lang
+        self.vosk_model_path = vosk_model_path
 
     def capture_utterance(self) -> str:
         """Blocking capture of one spoken request. Returns transcribed text."""
         from vosk import KaldiRecognizer
 
-        rec = KaldiRecognizer(get_model(), SAMPLE_RATE)
+        rec = KaldiRecognizer(get_model(self.vosk_model_lang, self.vosk_model_path), SAMPLE_RATE)
         rec.SetWords(False)
         self.mic.drain()
 
@@ -345,14 +365,15 @@ class SapiTTSProvider:
     safely reused across threads, and this also makes `stop()` (barge-in) reliable.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, voice_hint: str = "") -> None:
         import pyttsx3
+        self.voice_hint = (voice_hint or "").strip().lower()
         probe = pyttsx3.init()
         voices = probe.getProperty("voices")
-        self._male = next((v.id for v in voices if "david" in v.name.lower()),
-                          voices[0].id if voices else None)
-        self._female = next((v.id for v in voices if "zira" in v.name.lower()),
-                            voices[-1].id if voices else None)
+        self._male = self._select_voice(voices, "david", self.voice_hint,
+                                        voices[0].id if voices else None)
+        self._female = self._select_voice(voices, "zira", self.voice_hint,
+                                          voices[-1].id if voices else None)
         try:
             probe.stop()
         except Exception:
@@ -360,6 +381,23 @@ class SapiTTSProvider:
         self._engine = None
         self._lock = threading.Lock()
         self._stopped = threading.Event()
+
+    @staticmethod
+    def _select_voice(voices, english_name: str, hint: str, fallback):
+        """Pick a SAPI voice id.
+
+        A configured ``hint`` (substring of a voice name/id/lang) wins when any voice
+        matches it; otherwise fall back to the English ``david``/``zira`` selection, and
+        finally to ``fallback`` when nothing matches.
+        """
+        if hint:
+            for v in voices:
+                name = (getattr(v, "name", "") or "").lower()
+                vid = (getattr(v, "id", "") or "").lower()
+                langs = " ".join(str(x).lower() for x in (getattr(v, "languages", None) or []))
+                if hint in name or hint in vid or hint in langs:
+                    return v.id
+        return next((v.id for v in voices if english_name in v.name.lower()), fallback)
 
     async def synthesize(self, text: str, voice_id: str,
                          settings: VoiceSettings) -> AudioResult:

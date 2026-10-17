@@ -114,6 +114,10 @@ Each phase is independently shippable. Earlier phases are prerequisites for late
   TTS, launched by `jarvis-voice` (`voice_local.py`). Install `jarvis-local-agent[voice]`.
 - Optional upgrade: Porcupine wake word (`JARVIS_WAKE_ENGINE=porcupine` + `JARVIS_PICOVOICE_KEY`)
   and faster-whisper STT — the `voice-alt` extra. For higher-quality TTS, add Azure/ElevenLabs/Piper.
+- **Multi-language:** the dashboard browser mic (Chrome/Edge) speaks in any language the browser
+  supports with zero install; the desktop Vosk STT language is configurable via
+  `JARVIS_VOSK_MODEL_LANG` / `JARVIS_VOSK_MODEL_PATH`, with `JARVIS_TTS_VOICE_HINT` to prefer a
+  matching SAPI voice. The wake grammar derives from `JARVIS_WAKE_PHRASE`.
 - **Constraint:** use original synthetic voices; never imitate real actors.
 - **Exit:** end-to-end "Hey JARVIS → spoken answer" with no typed input (works today on Windows).
 

@@ -98,6 +98,10 @@ Behind Protocols; swap dev stubs for production engines with env vars. See
 | Router | `Router` (`core/router.py`) | `KeywordRouter` | `LangGraphRouter` | implement Protocol |
 | Scheduler | APScheduler (`jobs.py`) | in-process | persistent store / Celery / RQ | config |
 
+The dashboard voice button lets you speak in the browser (Chrome/Edge, multi-language) with no
+install, and the desktop Vosk STT language is configurable via `JARVIS_VOSK_MODEL_LANG` /
+`JARVIS_VOSK_MODEL_PATH` (pair with `JARVIS_TTS_VOICE_HINT` to prefer a matching SAPI voice).
+
 ## 5. Add a new skill (the extension recipe)
 
 Adding capability is **additive** — the supervisor and router pick it up with no changes.

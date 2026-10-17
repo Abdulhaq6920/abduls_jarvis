@@ -56,6 +56,24 @@ For Azure / ElevenLabs / Piper, implement `synthesize` + `speak` + `stop` and ma
 never imitate real actors or copyrighted performances.** The agent logic does not
 change.
 
+### Non-English Vosk models and SAPI voice hint
+
+The desktop Vosk stack defaults to English (`en-us`), but the language is configurable:
+
+| Env | Default | Effect |
+| --- | --- | --- |
+| `JARVIS_VOSK_MODEL_LANG` | `en-us` | Bundled language code loaded by `vosk.Model(lang=...)`. |
+| `JARVIS_VOSK_MODEL_PATH` | *(empty)* | Path to a downloaded model directory; set it to use a model that is not bundled. Overrides the language code. |
+| `JARVIS_TTS_VOICE_HINT` | *(empty)* | Substring of a SAPI voice name/id/language to prefer; empty keeps the english david/zira default. |
+
+To use another language, download a model from the Vosk model list
+(https://alphacephei.com/vosk/models), unzip it, and point `JARVIS_VOSK_MODEL_PATH` at that
+directory (or set `JARVIS_VOSK_MODEL_LANG` for a bundled language). The wake grammar is then
+derived from your configured `JARVIS_WAKE_PHRASE`, so a phrase in another language works too.
+Pair it with `JARVIS_TTS_VOICE_HINT` to prefer a matching non-English Windows voice for
+output. For the lowest-friction multi-language path, the dashboard browser voice button needs
+no downloads — the browser's own speech recognition handles the language selection.
+
 ## LLM / routing — `LLMProvider` + `Router`
 
 `jarvis_backend/core/llm.py` ships two `LLMProvider` implementations and a factory:

@@ -40,6 +40,13 @@ class RuntimeConfig(BaseSettings):
     wake_engine: str = "dev"
     stt_engine: str = "dev"
     tts_engine: str = "dev"
+    # Offline Vosk model selection: an empty path means "use the bundled language code"; a
+    # non-empty path points at a downloaded model directory (e.g. a non-English model).
+    vosk_model_lang: str = "en-us"
+    vosk_model_path: str = ""
+    # Optional preference for the SAPI voice (substring of a voice name/id/lang); empty keeps
+    # the default english david/zira selection.
+    tts_voice_hint: str = ""
 
     # --- local security allow-lists (the real boundary; the backend cannot widen them) ---
     allowed_paths: Annotated[List[str], NoDecode] = [str(Path.cwd())]
