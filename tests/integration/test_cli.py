@@ -75,6 +75,24 @@ def test_check_config_fails_loudly_on_unsafe_production(workdir, monkeypatch, ca
     get_settings.cache_clear()
 
 
+def test_check_config_never_prints_the_llm_api_key(workdir, monkeypatch, capsys):
+    # A production config that fails validation must not echo JARVIS_LLM_API_KEY into the
+    # sanitized output (pydantic's raw ValidationError rendering would otherwise leak it).
+    sentinel = "sk-REGRESSION-SENTINEL-0123456789"
+    monkeypatch.setenv("JARVIS_ENV", "prod")
+    monkeypatch.setenv("JARVIS_JWT_SECRET", "short")  # forces a validation failure
+    monkeypatch.setenv("JARVIS_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("JARVIS_LLM_BASE_URL", "http://api.example.com/v1")  # remote plaintext
+    monkeypatch.setenv("JARVIS_LLM_API_KEY", sentinel)
+    from jarvis_backend.config import get_settings
+    get_settings.cache_clear()
+    assert main(["check-config"]) == 1
+    out = capsys.readouterr().out
+    assert "INVALID CONFIGURATION" in out
+    assert sentinel not in out
+    get_settings.cache_clear()
+
+
 def test_env_template_has_no_real_secrets():
     """The committed example must stay a template: every secret field is empty."""
     values = env_values(ROOT / ".env.example")

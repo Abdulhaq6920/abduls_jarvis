@@ -23,7 +23,10 @@ def test_agents_never_claim_work_they_did_not_do(client, admin):
     """Honesty: with no web search / Gmail / LLM connected, the agents must say so."""
     assert "isn't connected" in say(client, admin, "ask SHURI to research agent security")["speech"]
     assert "isn't connected" in say(client, admin, "check my Gmail")["speech"]
-    assert "no language model" in say(client, admin, "ask VISION to analyse this")["speech"]
+    # VISION now answers via the default offline EchoLLM: a real (if deterministic) reply,
+    # never the old "no language model" stub.
+    vision = say(client, admin, "ask VISION to analyse this")["speech"]
+    assert vision and "no language model" not in vision.lower()
 
 
 def test_word_boundary_routing(client, admin):

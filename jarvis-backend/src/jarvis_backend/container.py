@@ -15,6 +15,7 @@ from jarvis_backend.auth.service import AuthService
 from jarvis_backend.auth.tokens import TokenCodec, build_codec
 from jarvis_backend.cache import Cache, build_cache
 from jarvis_backend.config import Settings
+from jarvis_backend.core.llm import build_llm
 from jarvis_backend.core.policy import PolicyEngine
 from jarvis_backend.core.router import KeywordRouter
 from jarvis_backend.core.supervisor import Supervisor
@@ -93,7 +94,7 @@ class Container:
         supervisor = Supervisor(
             registry=registry, config=agent_config, router=KeywordRouter(), policy=policy,
             approvals=approvals, audit=audit, turns=turns, memory=memory, bus=bus,
-            history_turns=settings.history_turns,
+            llm=build_llm(settings), history_turns=settings.history_turns,
         )
         runner = JobRunner(supervisor, job_runs, audit, bus)
         log.info("container ready", extra=settings.describe() | {"cache": cache.backend, "bus": bus.kind})

@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 from jarvis_shared.agents import AgentId, AgentSpec
 from jarvis_shared.security import RiskLevel, ToolRequest
 
+from jarvis_backend.core.llm import LLMMessage, LLMProvider
 from jarvis_backend.storage.memory import MemoryFull, MemoryStore
 
 
@@ -32,6 +33,7 @@ class AgentServices:
     """Everything an agent may use. Passed in, so agents stay easy to test."""
 
     memory: MemoryStore
+    llm: LLMProvider
 
 
 class BaseAgent:
@@ -158,20 +160,69 @@ class WongAgent(BaseAgent):
                             "or ask what I remember about a topic.")
 
 
-class UnconnectedAgent(BaseAgent):
-    """Agents whose real capability needs an LLM provider that is not configured yet."""
+class LLMAgent(BaseAgent):
+    """Pure-reasoning agents (VISION / DR_STRANGE / QUICKSILVER / NICK_FURY).
 
-    _VERB = {
-        AgentId.VISION: "analyse that",
-        AgentId.QUICKSILVER: "schedule that",
-        AgentId.NICK_FURY: "review that",
-        AgentId.DR_STRANGE: "plan that",
+    They answer by asking the configured :class:`LLMProvider` to reason, speaking only
+    text. They NEVER emit a ``ToolRequest``: the LLM only produces words, so it can never
+    bypass the policy gate or the local validator. With the default ``EchoLLM`` the answer
+    is the deterministic echo, which keeps dev and tests offline and reproducible.
+    """
+
+    # A one-line intent hint folded into the system prompt per persona.
+    _INTENT = {
+        AgentId.VISION: "Analyse what the user shares and reason it through clearly.",
+        AgentId.DR_STRANGE: "Lay out a concise, ordered plan or strategy.",
+        AgentId.QUICKSILVER: "Reason about the background/scheduled work the user describes; "
+                             "you cannot actually create jobs yet, so describe the plan, do not "
+                             "claim you scheduled anything.",
+        AgentId.NICK_FURY: "Reason about the security or risk angle; you cannot grant or deny "
+                           "approvals yourself, so advise, do not claim to have approved anything.",
     }
 
     async def handle(self, task: str, context: Dict[str, Any]) -> AgentOutcome:
-        verb = self._VERB.get(self.id, "handle that")
-        # SEAM: call the configured LLMProvider with this agent's persona and tools.
-        return AgentOutcome(f"I'd {verb}, but no language model is connected yet.")
+        # SEAM (now wired): reason with the configured LLMProvider. Reasoning only -- no
+        # ToolRequests, so the two security gates are never bypassed.
+        messages = [LLMMessage(role="system", content=self._system_prompt(context))]
+        messages.append(LLMMessage(role="user", content=task.strip()))
+        reply = await self.services.llm.complete(messages)
+        return AgentOutcome(reply.strip())
+
+    def _system_prompt(self, context: Dict[str, Any]) -> str:
+        personality = ", ".join(self.spec.personality) or "helpful"
+        lines = [
+            f"You are {self.spec.display_name}, a {personality} assistant.",
+            f"Your role: {self.spec.role}",
+            self._INTENT.get(self.id, "Help the user by reasoning carefully."),
+            "Keep answers concise and spoken-friendly (a few sentences, no markdown).",
+            "Never claim to have taken an external action you cannot perform; only reason "
+            "and explain.",
+        ]
+        lines.extend(self._context_lines(context))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _context_lines(context: Dict[str, Any]) -> List[str]:
+        out: List[str] = []
+        paths = context.get("allowed_paths") or []
+        if paths:
+            out.append("Allowed project paths: " + ", ".join(str(p) for p in paths[:5]) + ".")
+        apps = context.get("allowed_apps") or []
+        if apps:
+            out.append("Allowed applications: " + ", ".join(str(a) for a in apps[:10]) + ".")
+        memories = context.get("memories") or []
+        if memories:
+            out.append("Relevant notes you remember: "
+                       + " | ".join(str(m)[:160] for m in memories[:3]) + ".")
+        history = context.get("history") or []
+        if history:
+            recent = history[-3:]
+            turns = "; ".join(
+                f"user said '{str(t.get('user', ''))[:80]}', you replied '{str(t.get('reply', ''))[:80]}'"
+                for t in recent
+            )
+            out.append("Recent conversation: " + turns + ".")
+        return out
 
 
 _AGENT_CLASSES = {
@@ -181,4 +232,4 @@ _AGENT_CLASSES = {
 
 
 def build_agent(spec: AgentSpec, services: AgentServices) -> BaseAgent:
-    return _AGENT_CLASSES.get(spec.id, UnconnectedAgent)(spec, services)
+    return _AGENT_CLASSES.get(spec.id, LLMAgent)(spec, services)

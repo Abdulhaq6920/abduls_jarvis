@@ -34,6 +34,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MIN_SECRET_LENGTH = 32
 _PLACEHOLDERS = ("change", "example", "secret", "password", "default", "your-", "xxxx", "todo")
 _PRIVATE_DB_HOSTS = {"localhost", "127.0.0.1", "::1", "db", "postgres"}
+# Hosts a plaintext http:// LLM base URL may use (a local Ollama server). A Bearer key must
+# never be sent over http:// to any other host.
+_LLM_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _secrets_dir() -> Optional[str]:
@@ -119,6 +122,20 @@ class Settings(BaseSettings):
     run_scheduler: bool = True
     timezone: str = ""
 
+    # --- llm -----------------------------------------------------------------------
+    # Which language-model provider the reasoning agents (VISION / DR_STRANGE /
+    # QUICKSILVER / NICK_FURY) talk to. "echo" is the deterministic offline default used
+    # in dev and tests; "openai"/"ollama" speak the OpenAI-compatible /v1 chat API.
+    llm_provider: Literal["echo", "openai", "ollama"] = "echo"
+    llm_model: str = "gpt-4o-mini"
+    # OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://localhost:11434/v1.
+    # Empty with a non-echo provider falls back to EchoLLM (see build_llm).
+    llm_base_url: str = ""
+    # Optional: required for OpenAI, not for a local Ollama server.
+    llm_api_key: Optional[SecretStr] = None
+    llm_timeout_seconds: float = 30.0
+    llm_max_tokens: int = 512
+
     # --- observability -------------------------------------------------------------
     log_level: str = "INFO"
     log_format: Literal["text", "json"] = "text"
@@ -158,6 +175,10 @@ class Settings(BaseSettings):
     @property
     def redis_url_value(self) -> str:
         return self.redis_url.get_secret_value().strip() if self.redis_url else ""
+
+    @property
+    def llm_base_url_value(self) -> str:
+        return self.llm_base_url.strip().rstrip("/")
 
     def secret(self, name: str) -> str:
         value = getattr(self, name)
@@ -202,6 +223,23 @@ class Settings(BaseSettings):
             elif self.database_ssl == "prefer" and host not in _PRIVATE_DB_HOSTS:
                 warn("db_tls_optional", "database_ssl=prefer can silently fall back to plaintext; use "
                                         "require or verify-full.")
+        if self.llm_provider != "echo" and self.llm_base_url_value:
+            # A remote plaintext http:// endpoint leaks the prompt (user task + bounded local
+            # context) and any Bearer key on the wire -- confidentiality must not depend on
+            # whether a key is set. Loopback http:// (local Ollama) stays allowed. A malformed
+            # URL (e.g. an unterminated IPv6 literal) makes urlparse raise -- treat it as unsafe
+            # (fail closed) rather than letting the error abort config validation.
+            try:
+                parsed = urlparse(self.llm_base_url_value)
+                _ = parsed.port  # non-numeric port raises ValueError lazily; force it here
+                plaintext_remote = parsed.scheme == "http" and (parsed.hostname or "") not in _LLM_LOOPBACK_HOSTS
+            except ValueError:
+                plaintext_remote = True
+            if plaintext_remote:
+                err("llm_plaintext_remote", "JARVIS_LLM_BASE_URL is a plaintext HTTP endpoint on a "
+                                            "remote host; the prompt (and any JARVIS_LLM_API_KEY) would "
+                                            "travel in cleartext. Use an https:// base URL for hosted "
+                                            "providers (loopback http:// is allowed for local Ollama).")
         if self.redis_url_value.startswith("redis://") and self.is_prod:
             host = urlparse(self.redis_url_value).hostname or ""
             if host not in _PRIVATE_DB_HOSTS:

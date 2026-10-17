@@ -62,6 +62,25 @@ def test_secret_file_names_match_what_the_settings_loader_expects():
             assert name.removeprefix("jarvis_") in fields, name
 
 
+def test_env_example_has_no_real_secret_values():
+    """`.env.example` is committed and must stay secret-free: every secret-shaped assignment
+    is empty or a documented placeholder (no `hf_...`, `sk-...`, or other live token)."""
+    # Common hosted-provider credential prefixes a committed example must never carry.
+    token_prefixes = ("hf_", "sk-", "sk_", "ghp_", "xoxb-", "AKIA", "AIza")
+    for raw in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip().strip('"').strip("'")
+        if not value:
+            continue
+        assert not value.startswith(token_prefixes), f"{key} looks like a real token"
+        # A secret-named var must not hold a long opaque value (placeholders are empty here).
+        if re.search(r"(?i)(secret|password|token|_key|api_key)$", key.strip()):
+            assert len(value) < 16, f"{key} holds a secret-shaped value in a committed example"
+
+
 @pytest.mark.parametrize("name", ["api", "worker", "migrate"])
 def test_backend_containers_are_locked_down(name):
     svc = SERVICES[name]

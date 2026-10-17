@@ -144,11 +144,33 @@ def cmd_init_secrets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_config_error(exc: Exception) -> str:
+    """Render a config error WITHOUT leaking any input value.
+
+    Pydantic's ``str(ValidationError)`` echoes the raw input dict (including secrets such
+    as ``JARVIS_JWT_SECRET`` / ``JARVIS_LLM_API_KEY``). We therefore print only the
+    structured, value-free ``msg`` of each error -- our own validator messages already
+    name the offending setting without its value.
+    """
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        msgs = []
+        for err in exc.errors():
+            msg = str(err.get("msg", "")).strip()
+            # Pydantic prefixes value-error messages with "Value error, "; drop it so the
+            # output is just our safe findings. Never read err["input"] (the raw value).
+            msgs.append(msg.removeprefix("Value error, "))
+        return "\n".join(m for m in msgs if m) or "configuration is invalid"
+    # Non-pydantic failures (e.g. a raised ValueError) carry only our own message text.
+    return str(exc)
+
+
 def cmd_check_config(_: argparse.Namespace) -> int:
     try:
         settings = get_settings()
-    except Exception as exc:  # pydantic ValidationError carries the safe, value-free message
-        print(f"INVALID CONFIGURATION:\n{exc}")
+    except Exception as exc:  # keep output value-free -- never print the raw input
+        print(f"INVALID CONFIGURATION:\n{_safe_config_error(exc)}")
         return 1
     for key, value in settings.describe().items():
         print(f"  {key:15} {value}")

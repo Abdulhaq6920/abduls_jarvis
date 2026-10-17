@@ -26,6 +26,7 @@ from jarvis_shared.supervisor import SupervisorStage
 
 from jarvis_backend.agents.registry import AgentConfig, AgentRegistry
 from jarvis_backend.agents.runtime import AgentOutcome, AgentServices, build_agent
+from jarvis_backend.core.llm import LLMProvider
 from jarvis_backend.core.policy import PolicyEngine, describe_request
 from jarvis_backend.core.router import RouteDecision, Router
 from jarvis_backend.events import EventBus
@@ -48,13 +49,14 @@ class Supervisor:
         turns: TurnStore,
         memory: MemoryStore,
         bus: EventBus,
+        llm: LLMProvider,
         history_turns: int = 6,
     ) -> None:
         self.registry, self.config, self.router, self.policy = registry, config, router, policy
         self.approvals, self.audit, self.turns = approvals, audit, turns
         self.memory, self.bus = memory, bus
         self._history_turns = history_turns
-        self._services = AgentServices(memory=memory)
+        self._services = AgentServices(memory=memory, llm=llm)
 
     async def handle(self, req: AssistRequest) -> AssistResponse:
         started = time.perf_counter()
