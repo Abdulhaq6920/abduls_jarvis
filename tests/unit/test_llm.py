@@ -104,7 +104,8 @@ async def test_build_llm_budget_overrides_apply(monkeypatch):
     llm = build_llm(s, timeout=s.router_timeout_seconds, max_tokens=s.router_max_tokens)
     await llm.complete([LLMMessage(role="user", content="hi")])
 
-    assert s.router_max_tokens < s.llm_max_tokens and s.router_timeout_seconds < s.llm_timeout_seconds
+    assert s.router_max_tokens < s.llm_max_tokens
+    assert s.router_timeout_seconds < s.llm_timeout_seconds
     assert json.loads(captured["request"].content)["max_tokens"] == s.router_max_tokens
     assert captured["request"].extensions["timeout"]["connect"] == s.router_timeout_seconds
 
