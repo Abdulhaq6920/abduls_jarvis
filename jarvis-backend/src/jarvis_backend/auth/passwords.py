@@ -59,3 +59,14 @@ async def verify_password(stored_hash: Optional[str], password: str) -> bool:
 
 def needs_rehash(stored_hash: str) -> bool:
     return _hasher.check_needs_rehash(stored_hash)
+
+
+async def verify_hash(stored_hash: str, value: str) -> bool:
+    """Verify a value against a specific argon2 hash (e.g. one recovery-code hash).
+
+    Unlike :func:`verify_password` this takes a concrete hash and is used to walk a small
+    list of recovery-code hashes; a mismatch simply returns False."""
+    try:
+        return await asyncio.to_thread(_hasher.verify, stored_hash, value)
+    except (VerificationError, InvalidHashError):
+        return False

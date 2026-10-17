@@ -60,6 +60,21 @@ export async function login(username, password) {
   });
   if (!response.ok) throw await readError(response);
   const body = await response.json();
+  // An MFA account answers with a challenge instead of tokens: no access token is set and
+  // the caller must follow up with mfaLogin(). A normal account returns tokens here.
+  if (body.mfa_required) return body;
+  accessToken = body.access_token;
+  return body;
+}
+
+export async function mfaLogin(mfaToken, code) {
+  const response = await fetch('/api/auth/mfa/login', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mfa_token: mfaToken, code }),
+  });
+  if (!response.ok) throw await readError(response);
+  const body = await response.json();
   accessToken = body.access_token;
   return body;
 }

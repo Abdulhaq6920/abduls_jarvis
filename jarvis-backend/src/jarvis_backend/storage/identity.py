@@ -27,6 +27,14 @@ class UserStore:
         async with self._db.session() as s:
             return len((await s.execute(select(UserRow.id))).all())
 
+    async def any_admin_has_mfa(self) -> bool:
+        """True if at least one enabled admin has MFA on (used for a prod posture warning)."""
+        async with self._db.session() as s:
+            rows = (await s.execute(select(UserRow.mfa_enabled).where(
+                UserRow.role == "admin", UserRow.disabled.is_(False),
+                UserRow.mfa_enabled.is_(True)))).all()
+        return len(rows) > 0
+
     async def create(self, username: str, password_hash: str, role: str = "admin") -> UserRow:
         row = UserRow(id=str(uuid.uuid4()), username=username.strip().lower(),
                       password_hash=password_hash, role=role)
@@ -55,6 +63,48 @@ class UserStore:
             values["password_hash"] = new_hash
         async with self._db.session() as s:
             await s.execute(update(UserRow).where(UserRow.id == user_id).values(**values))
+
+    # ---------------------------------------------------------------------------- mfa
+    async def set_mfa_pending(self, user_id: str, secret: str) -> None:
+        """Store a freshly generated (unconfirmed) TOTP secret; MFA is NOT yet enabled."""
+        async with self._db.session() as s:
+            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+                mfa_secret=secret, mfa_enabled=False, mfa_last_counter=None,
+                mfa_recovery_hashes=None))
+
+    async def enable_mfa(self, user_id: str, recovery_hashes: List[str],
+                         last_counter: Optional[int] = None) -> None:
+        """Flip MFA on after a correct code confirmed the pending secret."""
+        async with self._db.session() as s:
+            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+                mfa_enabled=True, mfa_recovery_hashes=list(recovery_hashes),
+                mfa_last_counter=last_counter))
+
+    async def disable_mfa(self, user_id: str) -> None:
+        async with self._db.session() as s:
+            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+                mfa_secret=None, mfa_enabled=False, mfa_last_counter=None,
+                mfa_recovery_hashes=None))
+
+    async def set_mfa_counter(self, user_id: str, counter: int) -> None:
+        """Record the last-used TOTP counter so the same step cannot be replayed."""
+        async with self._db.session() as s:
+            await s.execute(update(UserRow).where(UserRow.id == user_id)
+                            .values(mfa_last_counter=counter))
+
+    async def consume_recovery_hash(self, user_id: str, index: int) -> bool:
+        """Remove a single recovery-code hash (single-use). False if it no longer exists.
+
+        Done under one session with a status-quo check so two parallel logins cannot both
+        spend the same code."""
+        async with self._db.session() as s:
+            row = await s.get(UserRow, user_id)
+            hashes = list(row.mfa_recovery_hashes or []) if row else []
+            if row is None or index < 0 or index >= len(hashes):
+                return False
+            del hashes[index]
+            row.mfa_recovery_hashes = hashes
+            return True
 
 
 # ------------------------------------------------------------------------- sessions
@@ -86,6 +136,12 @@ class SessionStore:
     async def is_active(self, session_id: str) -> bool:
         row = await self.get(session_id)
         return bool(row and row.revoked_at is None and row.expires_at > utcnow())
+
+    async def mark_step_up(self, session_id: str, at: Optional[datetime] = None) -> None:
+        """Record that this session just proved a fresh second factor (step-up re-auth)."""
+        async with self._db.session() as s:
+            await s.execute(update(SessionRow).where(SessionRow.id == session_id)
+                            .values(step_up_at=at or utcnow()))
 
     async def rotate(self, old_id: str) -> bool:
         """Atomically retire a refresh token. False if someone else already did."""

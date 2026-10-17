@@ -6,7 +6,7 @@ const level = (ok) => (ok ? 'ok' : 'danger');
 
 export function mountSystem(root) {
   const health = el('div'), runtime = el('div'), findings = el('div'), auditBox = el('div');
-  const jobsBox = el('div'), devicesBox = el('div'), sessionsBox = el('div');
+  const jobsBox = el('div'), devicesBox = el('div'), sessionsBox = el('div'), mfaBox = el('div');
 
   const kv = (rows) => el('dl', { class: 'kv' }, rows.map(([k, v]) => [el('dt', { text: k }), el('dd', {}, v)]));
   const badge = (ok, yes, no) => el('span', { class: `badge ${ok ? 'ok' : 'danger'}`, text: ok ? yes : no });
@@ -92,6 +92,54 @@ export function mountSystem(root) {
         el('button', { class: 'btn', type: 'button', onClick: changePassword }, 'Change password')));
   }
 
+  async function loadMfa() {
+    const status = await api('/api/auth/mfa/status');
+    clear(mfaBox, status.enabled ? mfaEnabledView() : mfaDisabledView());
+  }
+
+  const mfaDisabledView = () => {
+    const panel = el('div');
+    const start = async () => {
+      try {
+        const { secret, otpauth_uri: uri } = await api('/api/auth/mfa/enroll', { method: 'POST' });
+        const code = el('input', { type: 'text', inputmode: 'numeric', maxLength: 14, placeholder: '123456', 'aria-label': 'Confirmation code' });
+        const confirm = async () => {
+          try {
+            const { recovery_codes: codes } = await api('/api/auth/mfa/verify', { method: 'POST', body: { code: code.value.trim() } });
+            clear(panel, el('div', { class: 'secret-box' },
+              el('b', { text: 'MFA is on. Save these one-time recovery codes now; they are shown only once.' }),
+              ...codes.map((rc) => el('div', { class: 'mono', text: rc }))));
+            toast('MFA enabled', 'ok'); await loadMfa.after();
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        clear(panel,
+          el('p', { class: 'muted', text: 'Scan the URI below in your authenticator app, or type the secret in manually (SHA1, 6 digits, 30s). Then enter the code it shows to confirm.' }),
+          el('div', { class: 'secret-box' },
+            el('div', { text: 'Setup URI:' }), el('div', { class: 'mono', text: uri }),
+            el('div', { style: 'margin-top:6px', text: 'Secret (manual entry):' }), el('div', { class: 'mono', text: secret })),
+          el('div', { class: 'row', style: 'margin-top:10px' }, code, el('button', { class: 'btn primary', type: 'button', onClick: confirm }, 'Confirm & enable')));
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    clear(panel, el('p', { class: 'muted', text: 'Two-factor authentication is off. Add a TOTP authenticator for stronger sign-in and to approve high-risk actions.' }),
+      el('button', { class: 'btn primary', type: 'button', onClick: start }, 'Enable MFA'));
+    return panel;
+  };
+
+  const mfaEnabledView = () => {
+    const disable = async () => {
+      const current = window.prompt('Current password:'); if (!current) return;
+      const code = window.prompt('Authenticator code or a recovery code:'); if (!code) return;
+      try { await api('/api/auth/mfa/disable', { method: 'POST', body: { current_password: current, code: code.trim() } });
+        toast('MFA disabled', 'ok'); await loadMfa.after(); }
+      catch (e) { toast(e.message, 'error'); }
+    };
+    return el('div', {}, el('div', { class: 'row' }, el('span', { class: 'badge ok', text: 'ENABLED' }),
+      el('span', { class: 'muted', text: 'A code from your authenticator is required at sign-in and to approve high-risk actions.' })),
+      el('div', { class: 'row', style: 'margin-top:12px' }, el('button', { class: 'btn danger', type: 'button', onClick: disable }, 'Disable MFA')));
+  };
+
+  loadMfa.after = () => loadMfa().catch((e) => toast(e.message, 'error'));
+
   async function changePassword() {
     const current = window.prompt('Current password:'); if (!current) return;
     const next = window.prompt('New password (12+ characters):'); if (!next) return;
@@ -103,8 +151,9 @@ export function mountSystem(root) {
   const card = (title, ...body) => el('div', { class: 'card' }, el('h3', { text: title }), ...body);
   root.append(el('div', { class: 'grid cols-2' },
     el('div', { class: 'stack' }, card('Health', health), card('Runtime & memory', runtime), card('Configuration', findings), card('Scheduled jobs', jobsBox)),
-    el('div', { class: 'stack' }, card('Audit trail', auditBox), card('Local agents (devices)', devicesBox), card('Your sessions', sessionsBox))));
-  const all = () => Promise.all([loadStatus(), loadAudit(), loadJobs(), loadSessions()]);
+    el('div', { class: 'stack' }, card('Audit trail', auditBox), card('Two-factor authentication', mfaBox),
+      card('Local agents (devices)', devicesBox), card('Your sessions', sessionsBox))));
+  const all = () => Promise.all([loadStatus(), loadAudit(), loadJobs(), loadSessions(), loadMfa()]);
   all().catch((e) => toast(e.message, 'error')); loadDevices().catch((e) => toast(e.message, 'error'));
   const timer = setInterval(() => { loadStatus().catch(() => {}); loadAudit().catch(() => {}); }, 10000);
   return { onEvent: () => {}, destroy: () => clearInterval(timer) };

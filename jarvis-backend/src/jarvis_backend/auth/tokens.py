@@ -25,6 +25,10 @@ import jwt
 
 ALGORITHM = "HS256"
 ACCESS = "access"
+# Single-purpose short-lived kinds. They carry the SAME required claims and go through the
+# SAME decode rigor as an access token, but a distinct `typ` means `verify()` rejects them
+# as access tokens -- so an mfa_pending token can never authenticate a protected request.
+MFA_PENDING = "mfa_pending"  # noqa: S105 - a token-type label, not a credential
 _REQUIRED = ["exp", "iat", "nbf", "iss", "aud", "sub", "jti", "sid", "typ", "role"]
 _LEEWAY_SECONDS = 5  # tolerate small clock drift between replicas
 
@@ -64,24 +68,54 @@ class TokenCodec:
         return jwt.encode(payload, self._secret, algorithm=ALGORITHM,
                           headers={"kid": _kid(self._secret)})
 
-    def verify(self, token: str) -> Claims:
+    def issue_special(self, *, sub: str, sid: str, typ: str, ttl_seconds: int,
+                      role: str = "admin") -> str:
+        """Mint a single-purpose token (e.g. ``mfa_pending``) with a non-access ``typ``.
+
+        It carries the full required-claim set so it is validated with the same rigor as
+        an access token, but ``verify()`` will reject it for normal authentication."""
+        now = int(time.time())
+        payload = {
+            "iss": self._issuer, "aud": self._audience, "sub": sub, "role": role,
+            "sid": sid, "jti": str(uuid.uuid4()), "typ": typ,
+            "iat": now, "nbf": now, "exp": now + ttl_seconds,
+        }
+        return jwt.encode(payload, self._secret, algorithm=ALGORITHM,
+                          headers={"kid": _kid(self._secret)})
+
+    def _decode(self, token: str) -> dict:
+        header = jwt.get_unverified_header(token)
+        secret = self._keys.get(header.get("kid", ""))
+        if secret is None:
+            raise TokenError("unknown signing key")
         try:
-            header = jwt.get_unverified_header(token)
-            secret = self._keys.get(header.get("kid", ""))
-            if secret is None:
-                raise TokenError("unknown signing key")
-            data = jwt.decode(
+            return jwt.decode(
                 token, secret, algorithms=[ALGORITHM], issuer=self._issuer,
                 audience=self._audience, leeway=_LEEWAY_SECONDS,
                 options={"require": _REQUIRED},
             )
-        except TokenError:
-            raise
         except jwt.ExpiredSignatureError:
             raise TokenError("expired") from None
         except jwt.PyJWTError as exc:
             raise TokenError(type(exc).__name__) from None
+
+    def verify(self, token: str) -> Claims:
+        try:
+            data = self._decode(token)
+        except TokenError:
+            raise
         if data.get("typ") != ACCESS:
+            raise TokenError("wrong token type")
+        sub = str(data["sub"])
+        return Claims(sub=sub, role=str(data["role"]), sid=str(data["sid"]), jti=str(data["jti"]),
+                      exp=int(data["exp"]), kind="device" if sub.startswith("device:") else "user")
+
+    def verify_special(self, token: str, *, expected_typ: str) -> Claims:
+        """Validate a single-purpose token and require its exact ``typ`` (fail closed)."""
+        if expected_typ == ACCESS:
+            raise TokenError("wrong token type")
+        data = self._decode(token)
+        if data.get("typ") != expected_typ:
             raise TokenError("wrong token type")
         sub = str(data["sub"])
         return Claims(sub=sub, role=str(data["role"]), sid=str(data["sid"]), jti=str(data["jti"]),

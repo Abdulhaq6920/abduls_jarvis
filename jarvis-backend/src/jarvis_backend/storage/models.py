@@ -31,6 +31,13 @@ class UserRow(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     password_changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    # TOTP second factor. The base32 secret is field-ENCRYPTED at rest (never plaintext);
+    # it is set at enrollment and only `mfa_enabled` once a correct code is confirmed.
+    mfa_secret: Mapped[Optional[str]] = mapped_column(EncryptedText, nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mfa_last_counter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # replay guard
+    # argon2 hashes of one-time recovery codes (never plaintext); each used once.
+    mfa_recovery_hashes: Mapped[Optional[list]] = mapped_column(EncryptedJSON, nullable=True)
 
 
 class SessionRow(Base):
@@ -49,6 +56,8 @@ class SessionRow(Base):
     revoked_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     ip: Mapped[str] = mapped_column(String(64), default="")
     user_agent: Mapped[str] = mapped_column(String(200), default="")
+    # When the holder last proved a fresh second factor (step-up re-auth for high-risk grants).
+    step_up_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
 
 
 class DeviceRow(Base):

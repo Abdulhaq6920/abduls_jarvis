@@ -25,14 +25,16 @@ from typing import Optional
 from fastapi import HTTPException, status
 from jarvis_shared.log import get_logger
 
+from jarvis_backend.auth import totp
 from jarvis_backend.auth.passwords import (
     WeakPassword,
     check_policy,
     hash_password,
     needs_rehash,
+    verify_hash,
     verify_password,
 )
-from jarvis_backend.auth.tokens import Claims, TokenCodec, TokenError
+from jarvis_backend.auth.tokens import MFA_PENDING, Claims, TokenCodec, TokenError
 from jarvis_backend.cache import Cache
 from jarvis_backend.config import Settings
 from jarvis_backend.ratelimit import RateLimiter
@@ -70,6 +72,19 @@ class IssuedTokens:
     role: str
 
 
+@dataclass(frozen=True)
+class MfaRequired:
+    """Login's answer when the account has MFA: a short-lived single-purpose token the
+    caller must present (with a TOTP/recovery code) to a second endpoint. It is NOT an
+    access token and cannot authenticate any protected route."""
+
+    mfa_token: str
+    expires_in: int
+
+
+MFA_PENDING_TTL = 300  # seconds the mfa_pending token is valid (one login attempt)
+
+
 class AuthService:
     def __init__(self, *, settings: Settings, users: UserStore, sessions: SessionStore,
                  devices: DeviceStore, codec: TokenCodec, cache: Cache, limiter: RateLimiter,
@@ -77,14 +92,21 @@ class AuthService:
         self._s, self.users, self.sessions, self.devices = settings, users, sessions, devices
         self._codec, self._cache, self._limiter, self._audit = codec, cache, limiter, audit
 
-    # ----------------------------------------------------------------------- login
-    async def login(self, username: str, password: str, ip: str, user_agent: str) -> IssuedTokens:
-        name = username.strip().lower()[:64]
+    async def _enforce_login_limits(self, name: str, ip: str) -> str:
+        """The three login rate limits, applied to both password and the MFA step. Returns
+        the per-pair key so a success can clear it."""
         limit, window = self._s.login_attempts_per_window, self._s.login_window_seconds
         pair_key = f"login:pair:{ip}:{name}"
         await self._limiter.enforce(pair_key, limit=limit, window=window)
         await self._limiter.enforce(f"login:user:{name}", limit=limit * 4, window=window)
         await self._limiter.enforce(f"login:ip:{ip}", limit=limit * 6, window=window)
+        return pair_key
+
+    # ----------------------------------------------------------------------- login
+    async def login(self, username: str, password: str, ip: str,
+                    user_agent: str) -> "IssuedTokens | MfaRequired":
+        name = username.strip().lower()[:64]
+        pair_key = await self._enforce_login_limits(name, ip)
 
         user = await self.users.by_username(name)
         valid = await verify_password(user.password_hash if user else None, password)
@@ -93,13 +115,135 @@ class AuthService:
                                      reason="unknown_user" if user is None else "bad_credentials")
             raise _unauthorized("Invalid username or password.")
 
+        if needs_rehash(user.password_hash):
+            await self.users.touch_login(user.id, await hash_password(password))
+
+        if user.mfa_enabled:
+            # Password alone must NOT yield access/refresh tokens: hand back a single-purpose
+            # token the caller redeems with a second factor. The pair-limit stays armed so
+            # the MFA step is throttled too; it is cleared only on full success.
+            token = self._codec.issue_special(sub=user.id, sid=secrets.token_urlsafe(16),
+                                               typ=MFA_PENDING, ttl_seconds=MFA_PENDING_TTL)
+            await self._audit.record("mfa_challenge_issued", ip=ip, user=user.username)
+            return MfaRequired(mfa_token=token, expires_in=MFA_PENDING_TTL)
+
         await self._cache.delete("rl:" + pair_key)
-        await self.users.touch_login(user.id, await hash_password(password)
-                                     if needs_rehash(user.password_hash) else None)
+        await self.users.touch_login(user.id)
         issued = await self._open_session(user.id, user.username, user.role, None,
                                           timedelta(days=self._s.refresh_token_days), ip, user_agent)
         await self._audit.record("login_succeeded", ip=ip, user=user.username, sid=issued[1])
         return issued[0]
+
+    # ------------------------------------------------------------------------- mfa
+    async def _check_second_factor(self, user, code: str) -> bool:
+        """True if ``code`` is a valid TOTP (no replay) or an unused recovery code.
+
+        On a TOTP match the last-used counter is advanced; on a recovery match that code is
+        consumed. Fails CLOSED on a missing secret or any ambiguity."""
+        if not user.mfa_secret:
+            return False
+        counter = totp.verify(user.mfa_secret, code, last_counter=user.mfa_last_counter)
+        if counter is not None:
+            await self.users.set_mfa_counter(user.id, counter)
+            return True
+        for index, stored in enumerate(list(user.mfa_recovery_hashes or [])):
+            if await verify_hash(stored, code):
+                return await self.users.consume_recovery_hash(user.id, index)
+        return False
+
+    async def start_mfa_enrollment(self, principal: Principal) -> tuple[str, str]:
+        """Generate a fresh (unconfirmed) secret and the otpauth URI for an admin."""
+        user = await self.users.by_id(principal.subject)
+        if user is None:
+            raise _unauthorized()
+        secret = totp.generate_secret()
+        await self.users.set_mfa_pending(user.id, secret)
+        uri = totp.otpauth_uri(secret, account=user.username, issuer=self._s.mfa_issuer)
+        await self._audit.record("mfa_enrollment_started", user=user.username)
+        return secret, uri
+
+    async def confirm_mfa_enrollment(self, principal: Principal, code: str) -> list[str]:
+        """Confirm a 6-digit code against the pending secret, then enable MFA and return
+        one-time recovery codes (shown once; only hashes are stored)."""
+        user = await self.users.by_id(principal.subject)
+        if user is None or not user.mfa_secret or user.mfa_enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT, "No pending MFA enrollment to confirm.")
+        if totp.verify(user.mfa_secret, code) is None:
+            await self._audit.record("mfa_enroll_failed", user=user.username)
+            raise _unauthorized("That code is not valid. Check the time on your device and retry.")
+        codes = [secrets.token_hex(5) for _ in range(self._s.mfa_recovery_codes)]
+        hashes = [await hash_password(c) for c in codes]
+        # Do not seed last_counter from the confirmation step: enrollment confirm is not a
+        # login, and seeding it would reject a code generated in the same 30s window at the
+        # first real sign-in. Replay protection begins at the first authentication.
+        await self.users.enable_mfa(user.id, hashes, last_counter=None)
+        await self._audit.record("mfa_enabled", user=user.username)
+        return codes
+
+    async def disable_mfa(self, principal: Principal, current_password: str, code: str) -> None:
+        """Require BOTH a correct password AND a valid second factor (never password alone)."""
+        user = await self.users.by_id(principal.subject)
+        if user is None or not user.mfa_enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT, "MFA is not enabled.")
+        if not await verify_password(user.password_hash, current_password):
+            await self._audit.record("mfa_disable_failed", user=user.username, reason="password")
+            raise _unauthorized("Current password is incorrect.")
+        if not await self._check_second_factor(user, code):
+            await self._audit.record("mfa_disable_failed", user=user.username, reason="second_factor")
+            raise _unauthorized("That code is not valid.")
+        await self.users.disable_mfa(user.id)
+        await self._audit.record("mfa_disabled", user=user.username)
+
+    async def complete_mfa_login(self, mfa_token: str, code: str, ip: str,
+                                 user_agent: str) -> IssuedTokens:
+        """Second login step: redeem an mfa_pending token with a TOTP/recovery code."""
+        try:
+            claims = self._codec.verify_special(mfa_token, expected_typ=MFA_PENDING)
+        except TokenError:
+            raise _unauthorized("Your sign-in attempt expired. Start again.") from None
+        user = await self.users.by_id(claims.sub)
+        name = user.username if user else claims.sub[:64]
+        # The same three limits as the password step: the second factor is throttled too.
+        pair_key = await self._enforce_login_limits(name, ip)
+        if user is None or user.disabled or not user.mfa_enabled:
+            raise _unauthorized("Your sign-in attempt expired. Start again.")
+        if not await self._check_second_factor(user, code):
+            await self._audit.record("mfa_login_failed", ip=ip, user=user.username)
+            raise _unauthorized("That code is not valid.")
+        await self._cache.delete("rl:" + pair_key)
+        await self.users.touch_login(user.id)
+        issued = await self._open_session(user.id, user.username, user.role, None,
+                                          timedelta(days=self._s.refresh_token_days), ip, user_agent)
+        await self._audit.record("mfa_login_succeeded", ip=ip, user=user.username, sid=issued[1])
+        return issued[0]
+
+    async def verify_step_up(self, principal: Principal, code: str) -> None:
+        """Prove a fresh second factor and stamp the session (fail closed)."""
+        user = await self.users.by_id(principal.subject)
+        if user is None or not user.mfa_enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT, "MFA is not enabled for this account.")
+        if not await self._check_second_factor(user, code):
+            await self._audit.record("step_up_failed", user=user.username)
+            raise _unauthorized("That code is not valid.")
+        await self.sessions.mark_step_up(principal.sid)
+        await self._audit.record("step_up_verified", user=user.username, sid=principal.sid)
+
+    async def mfa_enabled_for(self, user_id: str) -> bool:
+        user = await self.users.by_id(user_id)
+        return bool(user and user.mfa_enabled)
+
+    async def ensure_step_up(self, principal: Principal, inline_code: Optional[str]) -> None:
+        """Gate a high-risk grant: accept an inline code now OR a recent step-up on the
+        session. Raises 401 otherwise. Caller only invokes this once MFA is confirmed on."""
+        if inline_code:
+            await self.verify_step_up(principal, inline_code)
+            return
+        row = await self.sessions.get(principal.sid)
+        fresh = (row is not None and row.step_up_at is not None
+                 and utcnow() - row.step_up_at <= timedelta(seconds=self._s.step_up_window_seconds))
+        if not fresh:
+            raise _unauthorized("Re-authentication required: confirm your second factor to "
+                                "approve a high-risk action.")
 
     async def _open_session(self, user_id: str, username: str, role: str, family_id: Optional[str],
                             lifetime: timedelta, ip: str, user_agent: str) -> tuple[IssuedTokens, str]:

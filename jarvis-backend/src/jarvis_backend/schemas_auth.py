@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# A six-digit TOTP code or an alphanumeric recovery code (dashes allowed).
+_CODE = Field(min_length=6, max_length=14, pattern=r"^[0-9A-Za-z\-]{6,14}$")
 
 
 class LoginIn(BaseModel):
@@ -31,6 +34,48 @@ class MeOut(BaseModel):
     role: str
     kind: str
     username: Optional[str] = None
+
+
+# ------------------------------------------------------------------------------ MFA
+class MfaEnrollOut(BaseModel):
+    """Returned when enrollment starts: the secret and URI for manual entry / QR import.
+
+    The secret is NOT returned again once MFA is confirmed."""
+
+    secret: str
+    otpauth_uri: str
+
+
+class MfaVerifyIn(BaseModel):
+    code: str = _CODE
+
+
+class MfaEnableOut(BaseModel):
+    """Recovery codes are shown exactly once here; only their hashes are stored."""
+
+    recovery_codes: List[str]
+
+
+class MfaDisableIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    code: str = _CODE
+
+
+class MfaLoginIn(BaseModel):
+    mfa_token: str = Field(min_length=1, max_length=4096)
+    code: str = _CODE
+
+
+class MfaStatusOut(BaseModel):
+    enabled: bool
+
+
+class MfaRequiredOut(BaseModel):
+    """Login's answer when MFA is enabled: no access/refresh yet, a second call is needed."""
+
+    mfa_required: bool = True
+    mfa_token: str
+    expires_in: int
 
 
 class DeviceTokenIn(BaseModel):

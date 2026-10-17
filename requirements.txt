@@ -59,6 +59,10 @@ asyncpg==0.32.0
 # Backend auth / security (jarvis-backend)
 # -----------------------------------------------------------------------------
 PyJWT==2.15.1
+# TOTP (RFC 6238) MFA. Declared as the intended dependency; the backend ships a
+# stdlib RFC-6238 implementation (auth/totp.py) and never imports pyotp, so the
+# offline runtime works even when this wheel is absent.
+pyotp==2.9.0
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
 cryptography==50.0.2

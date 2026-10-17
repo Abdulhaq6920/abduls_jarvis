@@ -94,6 +94,19 @@ class Settings(BaseSettings):
     login_window_seconds: int = 900
     assist_per_minute: int = 60
 
+    # --- multi-factor auth (TOTP) + step-up re-auth --------------------------------
+    # Issuer shown in the authenticator app and the otpauth:// URI.
+    mfa_issuer: str = "JARVIS"
+    # One-time recovery codes generated when MFA is enabled (shown once, stored hashed).
+    mfa_recovery_codes: int = 10
+    # How long a step-up proof stays fresh for high-risk approvals.
+    step_up_window_seconds: int = 300
+    # Harden approvals: when True, a high-risk grant requires the admin to have MFA.
+    approval_require_mfa: bool = False
+    # Lowest risk level that forces a step-up on a GRANT: "DANGEROUS" (default) or
+    # "RESTRICTED" (also gates RESTRICTED grants). SAFE never requires step-up.
+    approval_step_up_risk: Literal["DANGEROUS", "RESTRICTED"] = "DANGEROUS"
+
     # --- data protection -----------------------------------------------------------
     # Fernet key(s), comma separated, newest first. Encrypts conversations, memories and
     # approval payloads at rest. Generate with `python -m jarvis_backend init-secrets`.

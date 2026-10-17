@@ -17,6 +17,9 @@ dependencies = [
     "aiosqlite>=0.20",
     "httpx>=0.27",
     "PyJWT>=2.8",
+    # TOTP MFA. The runtime uses a stdlib RFC-6238 implementation (auth/totp.py) and
+    # never imports pyotp; this is the documented/intended dependency only.
+    "pyotp>=2.9",
     "argon2-cffi>=23.1",
     "cryptography>=42",
     "redis>=5.0",

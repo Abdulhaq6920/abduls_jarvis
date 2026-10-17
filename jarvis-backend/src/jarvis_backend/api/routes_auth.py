@@ -18,13 +18,20 @@ from jarvis_backend.auth.deps import (
     current_principal,
     verify_origin,
 )
-from jarvis_backend.auth.service import IssuedTokens, Principal
+from jarvis_backend.auth.service import IssuedTokens, MfaRequired, Principal
 from jarvis_backend.container import Container
 from jarvis_backend.schemas_auth import (
     ChangePasswordIn,
     DeviceTokenIn,
     LoginIn,
     MeOut,
+    MfaDisableIn,
+    MfaEnableOut,
+    MfaEnrollOut,
+    MfaLoginIn,
+    MfaRequiredOut,
+    MfaStatusOut,
+    MfaVerifyIn,
     SessionOut,
     TokenOut,
 )
@@ -46,11 +53,25 @@ def _token_out(issued: IssuedTokens) -> TokenOut:
                     username=issued.username, role=issued.role)
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post("/login", response_model=None)
 async def login(body: LoginIn, request: Request, response: Response,
-                c: Container = Depends(get_container)) -> TokenOut:
+                c: Container = Depends(get_container)) -> "TokenOut | MfaRequiredOut":
+    """Password login. For an MFA account this returns an ``mfa_required`` challenge (no
+    tokens, no refresh cookie); the caller then posts to ``/mfa/login`` with a code."""
     issued = await c.auth.login(body.username, body.password, client_ip(request),
                                 request.headers.get("user-agent", ""))
+    if isinstance(issued, MfaRequired):
+        return MfaRequiredOut(mfa_token=issued.mfa_token, expires_in=issued.expires_in)
+    _set_refresh_cookie(response, c, issued)
+    return _token_out(issued)
+
+
+@router.post("/mfa/login", response_model=TokenOut)
+async def mfa_login(body: MfaLoginIn, request: Request, response: Response,
+                    c: Container = Depends(get_container)) -> TokenOut:
+    """Second login step: redeem the mfa_pending token with a TOTP or recovery code."""
+    issued = await c.auth.complete_mfa_login(body.mfa_token, body.code, client_ip(request),
+                                             request.headers.get("user-agent", ""))
     _set_refresh_cookie(response, c, issued)
     return _token_out(issued)
 
@@ -103,6 +124,48 @@ async def change_password(body: ChangePasswordIn, response: Response,
 async def sessions(principal: Principal = admin_only,
                    c: Container = Depends(get_container)) -> list:
     return [SessionOut.model_validate(s) for s in await c.auth.sessions.list_for_user(principal.subject)]
+
+
+@router.get("/mfa/status", response_model=MfaStatusOut)
+async def mfa_status(principal: Principal = admin_only,
+                     c: Container = Depends(get_container)) -> MfaStatusOut:
+    return MfaStatusOut(enabled=await c.auth.mfa_enabled_for(principal.subject))
+
+
+@router.post("/mfa/enroll", response_model=MfaEnrollOut)
+async def mfa_enroll(principal: Principal = admin_only,
+                     c: Container = Depends(get_container)) -> MfaEnrollOut:
+    await c.limiter.enforce(f"mfa:enroll:{principal.subject}", limit=10, window=300)
+    secret, uri = await c.auth.start_mfa_enrollment(principal)
+    return MfaEnrollOut(secret=secret, otpauth_uri=uri)
+
+
+@router.post("/mfa/verify", response_model=MfaEnableOut)
+async def mfa_verify(body: MfaVerifyIn, principal: Principal = admin_only,
+                     c: Container = Depends(get_container)) -> MfaEnableOut:
+    await c.limiter.enforce(f"mfa:verify:{principal.subject}", limit=10, window=300)
+    codes = await c.auth.confirm_mfa_enrollment(principal, body.code)
+    return MfaEnableOut(recovery_codes=codes)
+
+
+@router.post("/mfa/disable", status_code=204)
+async def mfa_disable(body: MfaDisableIn, response: Response,
+                      principal: Principal = admin_only,
+                      c: Container = Depends(get_container)) -> Response:
+    await c.limiter.enforce(f"mfa:disable:{principal.subject}", limit=10, window=300)
+    await c.auth.disable_mfa(principal, body.current_password, body.code)
+    response.status_code = 204
+    return response
+
+
+@router.post("/mfa/step-up", status_code=204)
+async def mfa_step_up(body: MfaVerifyIn, response: Response,
+                      principal: Principal = admin_only,
+                      c: Container = Depends(get_container)) -> Response:
+    await c.limiter.enforce(f"mfa:stepup:{principal.subject}", limit=10, window=300)
+    await c.auth.verify_step_up(principal, body.code)
+    response.status_code = 204
+    return response
 
 
 @router.post("/device-token", response_model=TokenOut)

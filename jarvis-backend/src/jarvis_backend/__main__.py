@@ -7,6 +7,7 @@
     check-config    validate configuration and print a secret-free summary
     create-admin    create the first (or another) dashboard user
     create-device   register a local agent; prints its secret ONCE
+    enroll-mfa      enroll TOTP MFA for a user; prints recovery codes ONCE
     verify-audit    verify the audit log hash chain
 """
 from __future__ import annotations
@@ -246,6 +247,47 @@ def cmd_create_device(args: argparse.Namespace) -> int:
     return asyncio.run(run())
 
 
+def cmd_enroll_mfa(args: argparse.Namespace) -> int:
+    """Enroll (or re-enroll) TOTP MFA for a user from the command line.
+
+    Prints the otpauth URI + base32 secret for manual entry, waits for a 6-digit code to
+    confirm, then prints the one-time recovery codes ONCE. No secrets go to the logs."""
+    from jarvis_backend.auth.service import Principal
+    from jarvis_backend.container import Container
+
+    settings = get_settings()
+    _setup("cli", settings)
+    username = (args.username or input("Username: ")).strip().lower()
+
+    async def run() -> int:
+        c = await Container.create(settings)
+        try:
+            user = await c.auth.users.by_username(username)
+            if user is None:
+                print(f"User '{username}' does not exist.")
+                return 1
+            principal = Principal(subject=user.id, role=user.role, sid="cli", kind="user")
+            secret, uri = await c.auth.start_mfa_enrollment(principal)
+            print("\nAdd this account to your authenticator app:")
+            print(f"  otpauth URI : {uri}")
+            print(f"  secret      : {secret}   (manual entry; SHA1 / 6 digits / 30s)\n")
+            code = input("Enter the 6-digit code from your app to confirm: ").strip()
+            try:
+                codes = await c.auth.confirm_mfa_enrollment(principal, code)
+            except Exception:  # noqa: BLE001 - any failure means MFA is NOT enabled (fail closed)
+                print("That code was not accepted. MFA was NOT enabled. Try again.")
+                return 1
+            print("\nMFA is now enabled. Save these one-time recovery codes somewhere safe")
+            print("(each works once, and they are shown ONLY NOW):\n")
+            for rc in codes:
+                print(f"  {rc}")
+            return 0
+        finally:
+            await c.close()
+
+    return asyncio.run(run())
+
+
 def cmd_verify_audit(_: argparse.Namespace) -> int:
     from jarvis_backend.container import Container
 
@@ -285,6 +327,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     device = sub.add_parser("create-device", help="register a local agent")
     device.add_argument("--name", required=True)
     device.set_defaults(func=cmd_create_device)
+    enroll = sub.add_parser("enroll-mfa", help="enroll TOTP MFA for a user")
+    enroll.add_argument("--username")
+    enroll.set_defaults(func=cmd_enroll_mfa)
     sub.add_parser("verify-audit", help="verify the audit chain").set_defaults(func=cmd_verify_audit)
 
     args = parser.parse_args(argv)

@@ -1,5 +1,5 @@
 // App shell: login gate, navigation, live events.
-import { ApiError, login, logout, openEvents, restoreSession, session } from './api.js';
+import { ApiError, login, logout, mfaLogin, openEvents, restoreSession, session } from './api.js';
 import { clear, el, toast } from './dom.js';
 import { mountAgents } from './views/agents.js';
 import { mountApprovals } from './views/approvals.js';
@@ -24,12 +24,16 @@ function showLogin(message = '') {
   const password = el('input', { type: 'password', autocomplete: 'current-password', required: true, maxLength: 128, 'aria-label': 'Password' });
   const error = el('div', { class: 'error', role: 'alert', text: message });
   const submit = el('button', { class: 'btn primary', type: 'submit' }, 'Sign in');
+  const describe = (e) => (e instanceof ApiError && e.status === 429
+    ? `Too many attempts. Try again in ${Math.ceil((Number(e.retryAfter) || 60) / 60)} min.` : e.message);
   const form = el('form', { class: 'card login stack', onSubmit: async (event) => {
     event.preventDefault(); submit.disabled = true; error.textContent = '';
-    try { await login(username.value.trim(), password.value); password.value = ''; showApp(); }
-    catch (e) {
-      error.textContent = e instanceof ApiError && e.status === 429
-        ? `Too many attempts. Try again in ${Math.ceil((Number(e.retryAfter) || 60) / 60)} min.` : e.message;
+    try {
+      const result = await login(username.value.trim(), password.value); password.value = '';
+      if (result && result.mfa_required) { showMfaStep(result.mfa_token); return; }
+      showApp();
+    } catch (e) {
+      error.textContent = describe(e);
       submit.disabled = false; password.value = ''; password.focus();
     }
   } },
@@ -39,6 +43,25 @@ function showLogin(message = '') {
     el('p', { class: 'faint', style: 'text-align:center;margin:0', text: 'No account yet? Run: python -m jarvis_backend create-admin' }));
   clear(root, el('div', { class: 'login-wrap' }, form));
   username.focus();
+
+  // Second step for MFA accounts: a 6-digit code (or a recovery code) redeems the challenge.
+  function showMfaStep(mfaToken) {
+    const code = el('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code',
+      required: true, maxLength: 14, 'aria-label': 'Authentication code', placeholder: '123456' });
+    const mfaError = el('div', { class: 'error', role: 'alert' });
+    const verify = el('button', { class: 'btn primary', type: 'submit' }, 'Verify');
+    const mfaForm = el('form', { class: 'card login stack', onSubmit: async (event) => {
+      event.preventDefault(); verify.disabled = true; mfaError.textContent = '';
+      try { await mfaLogin(mfaToken, code.value.trim()); showApp(); }
+      catch (e) { mfaError.textContent = describe(e); verify.disabled = false; code.value = ''; code.focus(); }
+    } },
+      el('div', { class: 'brand' }, el('div', { class: 'orb' }), el('h1', { text: 'JARVIS' })),
+      el('p', { class: 'muted', style: 'text-align:center;margin:0', text: 'Enter the code from your authenticator app' }),
+      el('label', { class: 'field' }, 'Authentication code', code), mfaError, verify,
+      el('p', { class: 'faint', style: 'text-align:center;margin:0', text: 'Lost your device? Enter one of your recovery codes.' }));
+    clear(root, el('div', { class: 'login-wrap' }, mfaForm));
+    code.focus();
+  }
 }
 
 function setBadge(name, count) {
