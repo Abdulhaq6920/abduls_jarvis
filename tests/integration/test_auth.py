@@ -115,7 +115,10 @@ def test_logout_revokes_the_access_token_immediately(client):
 
 
 def test_refresh_rotates_the_token_and_replay_revokes_the_family(client, monkeypatch):
-    monkeypatch.setattr("jarvis_backend.auth.service.REFRESH_REUSE_GRACE", timedelta(0))
+    # Negative grace, not timedelta(0): the replay can land in the same clock tick as the
+    # rotation, making `elapsed > timedelta(0)` false and reuse detection flaky. A negative
+    # grace makes any replay (even same-instant) unambiguously past the window.
+    monkeypatch.setattr("jarvis_backend.auth.service.REFRESH_REUSE_GRACE", timedelta(seconds=-1))
     assert client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}).status_code == 200
     stolen = client.cookies.get("jarvis_refresh")
     ui = {"X-Requested-With": "jarvis-ui"}
