@@ -42,7 +42,9 @@ def test_production_refuses_unsafe_config(override, fragment):
 
 
 def test_dev_allows_missing_secrets_but_reports_them():
-    s = Settings(env="dev")
+    # _env_file=None so the test asserts the CODE's behaviour with secrets genuinely absent,
+    # independent of any developer's local (gitignored) .env that may supply real secrets.
+    s = Settings(env="dev", _env_file=None)
     codes = {f.code for f in s.findings()}
     assert {"jwt_secret_weak", "data_key_missing"} <= codes
     assert all(f.level == "warning" for f in s.findings())
