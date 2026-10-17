@@ -586,11 +586,49 @@ def test_totp_counter_advance_rejects_stale_previous(client, admin):
         start = user.mfa_last_counter  # the confirmation counter, already stored
         # Both callers read the SAME ``start`` and target the SAME next counter.
         target = (start or totp.current_counter()) + 1
-        first = await container.auth.users.advance_mfa_counter(user.id, target, start)
+        version = user.mfa_state_version
+        first = await container.auth.users.advance_mfa_counter(
+            user.id, target, start, expected_version=version)
         # A second caller that read the SAME old ``start`` now loses the compare-and-set
         # (the stored counter has moved to ``target`` and ``target < target`` is false).
-        second = await container.auth.users.advance_mfa_counter(user.id, target, start)
+        second = await container.auth.users.advance_mfa_counter(
+            user.id, target, start, expected_version=version)
         return first, second
 
     first, second = _run(race())
     assert first is True and second is False
+
+
+def test_totp_counter_advance_rejects_a_stale_factor_generation(client, admin):
+    """A TOTP code verified against an OLD secret generation must not advance the counter
+    after the factor has been rotated (disabled + re-enrolled). advance_mfa_counter pins the
+    mfa_state_version the code was checked against, so a stale-generation advance touches 0
+    rows and fails closed -- it can neither open a session nor stamp a step-up. (Review
+    finding: TOTP verification must not cross factor generations.)"""
+    from jarvis_backend.auth import totp
+    enroll_mfa(client, admin)
+    container = client.app.state.container
+
+    async def race():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        stale_version = user.mfa_state_version      # generation G
+        target = (user.mfa_last_counter or totp.current_counter()) + 1
+
+        # Rotate the factor: a disable + re-enroll bumps mfa_state_version past G.
+        assert await container.auth.users.disable_mfa(user.id, expected_version=stale_version)
+        assert await container.auth.users.set_mfa_pending(user.id, "ZZZZZZZZZZZZZZZZ")
+        assert await container.auth.users.enable_mfa(
+            user.id, ["h"], expected_secret="ZZZZZZZZZZZZZZZZ", last_counter=target - 1)
+        rotated = await container.auth.users.by_id(user.id)
+
+        # G's code (checked against the stale generation) must NOT advance generation H.
+        stale = await container.auth.users.advance_mfa_counter(
+            user.id, target, target - 1, expected_version=stale_version)
+        # The current generation H advancing its own counter still works.
+        fresh = await container.auth.users.advance_mfa_counter(
+            user.id, target, target - 1, expected_version=rotated.mfa_state_version)
+        return stale, fresh
+
+    stale, fresh = _run(race())
+    assert stale is False   # a stale-generation code is refused
+    assert fresh is True    # the current generation is unaffected

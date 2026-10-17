@@ -134,23 +134,34 @@ class UserStore:
             return res.rowcount == 1
 
     async def advance_mfa_counter(self, user_id: str, counter: int,
-                                  previous: Optional[int]) -> bool:
+                                  previous: Optional[int], *, expected_version: int) -> bool:
         """Compare-and-set the last-used TOTP counter: succeed only if the stored counter
-        is still ``previous`` AND the new counter is strictly greater.
+        is still ``previous``, the new counter is strictly greater, AND the factor is still
+        the SAME generation (``mfa_state_version``) that produced the verified code.
 
-        This closes the replay race: two requests reading the same stored counter and
-        matching the same TOTP cannot both advance -- exactly one UPDATE affects a row.
-        The ``counter > mfa_last_counter`` guard also rejects an already-passed step even
-        if ``previous`` was read as stale-null by a racing caller."""
+        This closes two races:
+        * Replay -- two requests reading the same stored counter and matching the same TOTP
+          cannot both advance; exactly one UPDATE affects a row.
+        * Cross-generation acceptance -- a code verified against a stale secret snapshot
+          must not advance a row that has since rotated to a new factor (disable + re-enroll
+          each bump ``mfa_state_version``). Pinning ``expected_version`` in the WHERE clause
+          makes such a stale verification touch 0 rows, so it can neither open a session nor
+          stamp a step-up against the replacement factor -- we fail closed.
+
+        Ordinary TOTP use does NOT bump ``mfa_state_version`` (only enroll/confirm/disable/
+        recovery-consume rotate the factor), so concurrent legitimate step-ups do not
+        spuriously invalidate each other."""
         async with self._db.session() as s:
             # Strictly-increasing guard: the stored counter must still be ``previous`` AND
             # the new counter must be greater than whatever is stored. A duplicate that read
             # the same ``previous`` after the counter already moved to ``counter`` loses,
-            # because ``counter > counter`` is false -- so a step cannot be re-advanced.
+            # because ``counter > counter`` is false -- so a step cannot be re-advanced. The
+            # version clause binds acceptance to the generation whose secret verified the code.
             prev_clause = (UserRow.mfa_last_counter.is_(None) if previous is None
                            else UserRow.mfa_last_counter == previous)
             res = await s.execute(update(UserRow).where(
-                UserRow.id == user_id, UserRow.mfa_enabled.is_(True), prev_clause,
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(True),
+                UserRow.mfa_state_version == expected_version, prev_clause,
                 (UserRow.mfa_last_counter.is_(None) | (UserRow.mfa_last_counter < counter))).values(
                 mfa_last_counter=counter))
             return res.rowcount == 1

@@ -149,8 +149,13 @@ class AuthService:
         if counter is not None:
             # Compare-and-set: only the request that actually advances the stored counter
             # from the value it read wins. A racing duplicate with the same step loses the
-            # UPDATE and is rejected -- no replay, even on a concurrent backend.
-            return await self.users.advance_mfa_counter(user.id, counter, user.mfa_last_counter)
+            # UPDATE and is rejected -- no replay, even on a concurrent backend. The counter
+            # is also pinned to the generation (mfa_state_version) whose secret verified this
+            # code, so a code checked against a stale snapshot cannot authenticate a factor
+            # that was rotated (disabled + re-enrolled) in the meantime -- it fails closed.
+            return await self.users.advance_mfa_counter(
+                user.id, counter, user.mfa_last_counter,
+                expected_version=user.mfa_state_version)
         for stored in list(user.mfa_recovery_hashes or []):
             if await verify_hash(stored, code):
                 # Consume by the matched hash so two parallel logins cannot both spend one
