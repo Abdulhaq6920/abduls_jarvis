@@ -131,8 +131,32 @@ is unaffected.
 | `JARVIS_LLM_TIMEOUT_SECONDS` | `30` | Per-request timeout. |
 | `JARVIS_LLM_MAX_TOKENS` | `512` | Response length cap. |
 
-`jarvis_backend/core/router.py` ships `KeywordRouter`. A `LangGraphRouter` implementing the
-`Router` Protocol can replace it; the supervisor is agnostic.
+### Routing — `Router`
+
+`jarvis_backend/core/router.py` ships two `Router` implementations and a factory:
+
+- `KeywordRouter` — deterministic and offline. Explicit name, then whole-word
+  `routing_keywords` scoring, then JARVIS. Predictable, but blind to synonyms and spelling
+  variants ("analyse" vs `analyze`).
+- `LLMRouter` — hands the utterance and a menu of agents (id, role, keywords, derived from
+  the live roster) to the `LLMProvider` and asks for one agent id, so a natural phrasing
+  reaches the right specialist without "ask TONY to ...". It wraps a `KeywordRouter`.
+- `build_router(settings, llm)` — `KeywordRouter` for `JARVIS_ROUTER=keyword`, otherwise
+  `LLMRouter`.
+
+The fallback chain is strict: **explicit `ask <agent> to ...` → LLM → keywords → JARVIS.**
+An explicitly named agent always wins and is never sent to the model. `LLMRouter.route`
+never raises (same policy as the provider): an unreachable model, an unparsable reply or a
+name that is not on the roster all degrade to keyword routing, and the PLAN stage records
+which path was taken. `EchoLLM` is short-circuited **before** any call, so the dev/test
+default is exactly the deterministic keyword behaviour.
+
+Routing only decides *who answers*; the chosen agent's `ToolRequest`s still pass the policy
+gate and the local validator unchanged.
+
+| Env | Default | Effect |
+| --- | --- | --- |
+| `JARVIS_ROUTER` | `llm` | `llm` \| `keyword`. `llm` falls back to keywords whenever the model is unavailable or unsure (always, with the `echo` provider). |
 
 ## Web search — `SearchProvider`
 

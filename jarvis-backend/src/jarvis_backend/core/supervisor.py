@@ -128,7 +128,7 @@ class Supervisor:
         }
 
     async def _plan(self, req: AssistRequest) -> tuple[RouteDecision, Optional[str]]:
-        decision = self.router.route(req.utterance, self.registry.all())
+        decision = await self.router.route(req.utterance, self.registry.all())
         if await self.config.is_enabled(decision.agent_id):
             return decision, None
         name = self.registry.get(decision.agent_id).display_name

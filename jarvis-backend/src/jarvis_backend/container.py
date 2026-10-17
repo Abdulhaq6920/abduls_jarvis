@@ -18,7 +18,7 @@ from jarvis_backend.config import Settings
 from jarvis_backend.core.llm import build_llm
 from jarvis_backend.core.policy import PolicyEngine
 from jarvis_backend.core.search import build_search
-from jarvis_backend.core.router import KeywordRouter
+from jarvis_backend.core.router import build_router
 from jarvis_backend.core.supervisor import Supervisor
 from jarvis_backend.crypto import FieldCipher, set_cipher
 from jarvis_backend.events import EventBus, build_bus
@@ -101,10 +101,12 @@ class Container:
         registry = AgentRegistry()
         agent_config = AgentConfig(AgentSettingsStore(db), cache)
         policy = PolicyEngine()
+        # One provider instance serves both the reasoning agents and the router.
+        llm = build_llm(settings)
         supervisor = Supervisor(
-            registry=registry, config=agent_config, router=KeywordRouter(), policy=policy,
-            approvals=approvals, audit=audit, turns=turns, memory=memory, bus=bus,
-            llm=build_llm(settings), search=build_search(settings),
+            registry=registry, config=agent_config, router=build_router(settings, llm),
+            policy=policy, approvals=approvals, audit=audit, turns=turns, memory=memory,
+            bus=bus, llm=llm, search=build_search(settings),
             history_turns=settings.history_turns,
         )
         runner = JobRunner(supervisor, job_runs, audit, bus)

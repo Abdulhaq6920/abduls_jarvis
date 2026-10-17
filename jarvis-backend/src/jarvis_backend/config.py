@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 30.0
     llm_max_tokens: int = 512
 
+    # --- routing -------------------------------------------------------------------
+    # Which Router decides who answers. "llm" (default) classifies natural phrasings with
+    # the provider above, so the user never has to say "ask TONY to ...". With the default
+    # provider="echo" the LLM router short-circuits to the deterministic KeywordRouter, so
+    # dev/test behaviour is unchanged until a real model is configured. "keyword" pins the
+    # deterministic router even when a model IS configured.
+    router: Literal["keyword", "llm"] = "llm"
+
     # --- search --------------------------------------------------------------------
     # Which web-search engine SHURI's research uses. "none" is the disabled default used in
     # dev and tests (no network, no key). "duckduckgo"/"generic" talk to a DuckDuckGo-shaped

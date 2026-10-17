@@ -82,7 +82,7 @@ The supervisor **only decides**; it never executes tools itself.
 | Capability | State | Notes |
 |---|---|---|
 | Local wake word + offline STT + per-agent TTS voices | 🟡 | Dev engines work with zero deps. The **real on-device stack** (`jarvis-voice`) is **Vosk + Windows SAPI** — functional on Windows today. Porcupine / faster-whisper are the alternative (`voice-alt`) extra. |
-| Routing, delegation, 7-stage supervisor trace | ✅ | Deterministic `KeywordRouter`; a `LangGraphRouter` can replace it via the `Router` Protocol. |
+| Routing, delegation, 7-stage supervisor trace | ✅ | `LLMRouter` routes natural phrasings (explicit name → LLM → keywords → JARVIS) over the deterministic `KeywordRouter`; keyword-only offline. |
 | Real command execution on the PC (allow-listed + re-validated) | ✅ | Terminal/filesystem/application through two gates. |
 | Approvals (human grants, device executes, exactly once) | ✅ | Atomic claim; grants expire; separation of duties enforced. |
 | Long-term memory ("remember that…"), encrypted at rest | ✅ | WONG; field-level Fernet encryption. |

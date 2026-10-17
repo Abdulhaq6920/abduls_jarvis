@@ -80,13 +80,18 @@ Design choices worth noting:
 
 ### 3.2 Router (`core/router.py`)
 
-`KeywordRouter` implements the `Router` Protocol — deterministic and offline. Precedence:
-1. **Explicit** `ask/tell/get/have <agent> to <task>` wins (regex + alias table).
-2. Otherwise score agents by whole-word keyword matches (tolerates simple plural/verb endings).
-3. Otherwise **JARVIS** answers directly.
+Two `Router` implementations, same async `route()` Protocol. Precedence is one chain:
+1. **Explicit** `ask/tell/get/have <agent> to <task>` wins (shared regex + alias table); the
+   model is never consulted for it.
+2. `LLMRouter` (default, `JARVIS_ROUTER=llm`) asks the `LLMProvider` to pick one agent from a
+   menu derived from the live roster — this is what makes a natural phrasing route itself.
+3. `KeywordRouter` scores whole-word `routing_keywords` (tolerates simple plural/verb endings).
+   It is the fallback for *every* LLM failure path, and the short-circuit for `EchoLLM`.
+4. Otherwise **JARVIS** answers directly.
 
-`strip_wake_word()` removes the "hey/hi/ok jarvis" preamble first. A `LangGraphRouter` implementing
-the same `route()` method can replace it with no supervisor change.
+`strip_wake_word()` removes the "hey/hi/ok jarvis" preamble first. `route()` never raises, so a
+model outage can't 500 an `/assist`; the PLAN stage reason records which path decided. Routing
+only picks *who answers* — the two security gates are unchanged.
 
 ### 3.3 Agents (`agents/runtime.py`)
 
