@@ -75,24 +75,37 @@ function navigate(id) {
   current?.destroy?.();
   Object.entries(navButtons).forEach(([key, node]) => (key === id ? node.setAttribute('aria-current', 'page') : node.removeAttribute('aria-current')));
   const body = el('div');
-  clear(content, el('div', { class: 'topbar' }, el('div', {}, el('h2', { text: label }), el('div', { class: 'page-sub', text: sub }))), body);
+  clear(content, el('div', { class: 'topbar' },
+    el('div', { class: 'row' }, menuButton, el('div', {}, el('h2', { text: label }), el('div', { class: 'page-sub', text: sub })))), body);
   current = mount(body, { setBadge, refreshBadges: () => {} }) || null;
   if (location.hash.slice(1) !== id) history.replaceState(null, '', `#${id}`);
 }
 
-let content;
+let content, shell;
+// Mobile: the sidebar is an off-canvas drawer. These toggle the .nav-open class on .shell
+// (all positioning is CSS); on desktop the class is inert because the drawer rules only
+// apply under the max-width:980px media query.
+function openNav() { shell?.classList.add('nav-open'); menuButton?.setAttribute('aria-expanded', 'true'); }
+function closeNav() { shell?.classList.remove('nav-open'); menuButton?.setAttribute('aria-expanded', 'false'); }
+let menuButton = null;
+
 function showApp() {
   navButtons = {};
   content = el('main', { class: 'main', id: 'content' });
   const live = el('span', { class: 'dot', title: 'Live updates' });
   const nav = el('nav', { class: 'nav', 'aria-label': 'Main' }, VIEWS.map(([id, label]) => {
-    const button = el('button', { type: 'button', onClick: () => navigate(id) }, label, el('span', { class: 'badge-count hidden', text: '0' }));
+    const button = el('button', { type: 'button', onClick: () => { navigate(id); closeNav(); } }, label, el('span', { class: 'badge-count hidden', text: '0' }));
     navButtons[id] = button; return button;
   }));
-  clear(root, el('div', { class: 'shell' },
+  menuButton = el('button', { class: 'menu-btn', type: 'button', 'aria-label': 'Toggle navigation', 'aria-expanded': 'false',
+    onClick: () => (shell?.classList.contains('nav-open') ? closeNav() : openNav()) },
+    el('span', { class: 'bar' }), el('span', { class: 'bar' }), el('span', { class: 'bar' }));
+  const scrim = el('div', { class: 'scrim', onClick: closeNav });
+  shell = el('div', { class: 'shell' }, scrim,
     el('aside', { class: 'side' }, el('div', { class: 'brand' }, el('div', { class: 'orb' }), el('h1', { text: 'JARVIS' })), nav,
       el('div', { class: 'foot' }, el('div', { class: 'row' }, live, el('span', { text: 'Live' })),
-        el('button', { class: 'btn small', type: 'button', style: 'margin-top:10px', onClick: () => logout() }, 'Sign out'))), content));
+        el('button', { class: 'btn small', type: 'button', style: 'margin-top:10px', onClick: () => logout() }, 'Sign out'))), content);
+  clear(root, shell);
   stopEvents = openEvents((event) => current?.onEvent?.(event), (up) => live.classList.toggle('ok', up));
   const wanted = location.hash.slice(1);
   navigate(VIEWS.some((v) => v[0] === wanted) ? wanted : 'overview');

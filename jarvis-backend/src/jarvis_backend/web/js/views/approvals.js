@@ -16,13 +16,13 @@ export function mountApprovals(root, ctx) {
     clear(pending, waiting.length ? waiting.map(card)
       : el('div', { class: 'empty', text: 'Nothing is waiting for you. Risky actions will appear here before they run.' }));
     const past = all.filter((a) => a.status !== 'PENDING');
-    clear(history, past.length ? el('table', {},
+    clear(history, past.length ? el('div', { class: 'table-wrap' }, el('table', {},
       el('thead', {}, el('tr', {}, ['When', 'Agent', 'Action', 'Status'].map((h) => el('th', { text: h })))),
       el('tbody', {}, past.map((a) => el('tr', {},
         el('td', { class: 'faint', text: clock(a.created_at) }), el('td', { text: pretty(a.agent_id) }),
         el('td', { text: a.summary }),
         el('td', {}, el('span', { class: `badge ${TONE[a.status] || 'mute'}`, text: a.status }),
-          a.result && a.result.error ? el('div', { class: 'faint', text: a.result.error }) : null))))) :
+          a.result && a.result.error ? el('div', { class: 'faint', text: a.result.error }) : null)))))) :
       el('div', { class: 'empty', text: 'No history yet.' }));
   }
 

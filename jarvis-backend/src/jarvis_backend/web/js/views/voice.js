@@ -1,6 +1,7 @@
 // Overview / voice console: runtime state, talk box, live agent chain.
 import { api } from '../api.js';
 import { clear, el, pretty, timeAgo, toast } from '../dom.js';
+import { startSpeakingOrb, stopSpeakingOrb, teardownSpeakingOrb } from '../orb.js';
 import { speakPreview } from './agents.js';
 
 // BCP-47 languages offered for browser voice input/output. Edit this list to add more;
@@ -99,6 +100,12 @@ export function mountOverview(root, ctx) {
   const tile = (label, value, tone = '') => el('div', { class: 'card' }, el('h3', { text: label }),
     el('div', { class: 'state-name', style: 'font-size:22px;letter-spacing:1px' }, String(value), tone ? el('span', { class: `badge ${tone}`, style: 'margin-left:10px' }, tone === 'ok' ? 'OK' : 'CHECK') : null));
 
+  // Tracks the speech this console just spoke itself, so the matching `presence` WS event
+  // (the supervisor publishes one for every /api/assist) does not re-trigger the orb and
+  // double it up. Cleared after a short window.
+  let lastSpoken = '';
+  let presenceOrbTimer = null;
+
   async function send() {
     const text = input.value.trim(); if (!text) return;
     input.value = ''; setState('THINKING', 'Routing…', 'thinking');
@@ -108,10 +115,30 @@ export function mountOverview(root, ctx) {
       clear(chain, agents.map((a, i) => [i ? el('span', { class: 'arrow', text: '→' }) : null, el('span', { class: `chip ${a === r.responding_agent ? 'lead' : ''}`, text: pretty(a) })]));
       activity.textContent = `${r.delegation_note ? `${r.delegation_note}  ` : ''}“${r.speech}”`;
       setState('SPEAKING', pretty(r.responding_agent), 'active');
-      const v = voices[r.responding_agent]; if (v) speakPreview(r.speech, v, sessionLang);
-      setTimeout(() => setState('READY', 'Say “Hey JARVIS”', ''), 2500);
+      lastSpoken = r.speech;
+      setTimeout(() => { if (lastSpoken === r.speech) lastSpoken = ''; }, 4000);
+      // Light up the big center-screen orb tinted to the responding agent, tracking the
+      // REAL speech boundaries (onstart/onend) exposed by speakPreview. If this browser has
+      // no speechSynthesis the hooks still fire so the orb appears, then fades on a timer.
+      let orbToken = null;
+      const v = voices[r.responding_agent];
+      speakPreview(r.speech, v || { pitch: 1, speed: 1, language: sessionLang }, sessionLang, {
+        onStart: () => { orbToken = startSpeakingOrb(r.responding_agent, r.speech); },
+        onEnd: () => { stopSpeakingOrb(orbToken); setState('READY', 'Say “Hey JARVIS”', ''); },
+      });
     } catch (error) { setState('READY', 'Say “Hey JARVIS”', ''); toast(error.message, 'error'); }
     refresh().catch(() => {});
+  }
+
+  // A `presence` event means some agent spoke — e.g. the local voice runtime, or another
+  // dashboard tab. Flash the center orb (no audio: that reply is spoken wherever it
+  // originated). Skip the echo of our own just-sent request to avoid doubling the orb.
+  function flashPresenceOrb(e) {
+    if (!e.responding_agent) return;
+    if (e.speech && e.speech === lastSpoken) return;
+    const token = startSpeakingOrb(e.responding_agent, e.speech || '');
+    clearTimeout(presenceOrbTimer);
+    presenceOrbTimer = setTimeout(() => stopSpeakingOrb(token), Math.min(12000, 2500 + (e.speech ? e.speech.length * 55 : 0)));
   }
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 
@@ -125,6 +152,15 @@ export function mountOverview(root, ctx) {
 
   refresh().catch((e) => toast(e.message, 'error'));
   const timer = setInterval(() => refresh().catch(() => {}), 10000);
-  return { onEvent: (e) => { if (e.type === 'runtime' || e.type === 'approval' || e.type === 'presence') refresh().catch(() => {}); },
-    destroy: () => clearInterval(timer) };
+  return {
+    onEvent: (e) => {
+      if (e.type === 'presence') flashPresenceOrb(e);
+      if (e.type === 'runtime' || e.type === 'approval' || e.type === 'presence') refresh().catch(() => {});
+    },
+    destroy: () => {
+      clearInterval(timer); clearTimeout(presenceOrbTimer);
+      window.speechSynthesis?.cancel();
+      teardownSpeakingOrb();
+    },
+  };
 }

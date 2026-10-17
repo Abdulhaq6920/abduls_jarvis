@@ -2,17 +2,29 @@
 import { api } from '../api.js';
 import { clear, clock, el, initial, pretty, timeAgo, toast } from '../dom.js';
 
+// Mirrors the per-agent glow palette in app.css (.glow-*) so the roster avatar colour and
+// the center speaking-orb tint agree.
 const ACCENT = {
-  JARVIS: '#36c6ff', FRIDAY: '#7ee0c0', VISION: '#c9a6ff', NATASHA: '#ff8fa3', WONG: '#ffcf6b',
-  TONY: '#ff9d4d', SHURI: '#9af0ff', QUICKSILVER: '#d7e3ff', NICK_FURY: '#ff6b6b', DR_STRANGE: '#8ad6a8',
+  JARVIS: '#36c6ff', SHURI: '#a98bff', TONY: '#ffbe3d', NATASHA: '#ff5c6c', FRIDAY: '#2fe0c6',
+  WONG: '#ffb020', VISION: '#39d98a', DR_STRANGE: '#ff5ad6', QUICKSILVER: '#bcd2ff', NICK_FURY: '#9fb3c8',
 };
 
-export function speakPreview(text, voice, langOverride) {
+export function speakPreview(text, voice, langOverride, hooks = {}) {
   // Browser approximation of the agent's voice (the real audio is produced by the local
   // runtime). Pitch/speed come from the saved profile so edits are audible straight away.
   // An optional langOverride lets the Overview console speak the reply in the language the
   // user picked for voice input, falling back to the agent's own language.
-  if (!('speechSynthesis' in window)) { toast('This browser has no speech synthesis.', 'error'); return; }
+  //
+  // `hooks` may carry onStart()/onEnd() callbacks so callers (the Overview console) can
+  // drive the center-screen speaking orb off the REAL speech boundaries. If this browser
+  // has no speech synthesis we still fire the hooks (start then a short end) so the orb
+  // still shows the reply instead of silently doing nothing.
+  const { onStart, onEnd } = hooks;
+  if (!('speechSynthesis' in window)) {
+    toast('This browser has no speech synthesis.', 'error');
+    if (onStart) { onStart(); setTimeout(() => onEnd && onEnd(), 2200); }
+    return;
+  }
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.pitch = Math.min(2, Math.max(0, voice.pitch));
@@ -21,7 +33,13 @@ export function speakPreview(text, voice, langOverride) {
   const prefix = utterance.lang.slice(0, 2).toLowerCase();
   const match = (window.speechSynthesis.getVoices() || []).find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
   if (match) utterance.voice = match;
+  if (onStart) utterance.onstart = () => onStart();
+  if (onEnd) { utterance.onend = () => onEnd(); utterance.onerror = () => onEnd(); }
   window.speechSynthesis.speak(utterance);
+  // Safety net: some engines never fire onstart. Nudge the orb on after a tick if it has
+  // not started yet, and guarantee an end after a generous length-based cap.
+  if (onStart) setTimeout(() => { if (window.speechSynthesis.speaking) onStart(); }, 250);
+  if (onEnd) setTimeout(() => onEnd(), Math.min(30000, 2500 + text.length * 90));
 }
 
 export function mountAgents(root, ctx) {

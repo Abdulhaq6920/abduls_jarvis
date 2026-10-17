@@ -43,13 +43,13 @@ export function mountSystem(root) {
 
   async function loadJobs() {
     const jobs = await api('/api/jobs');
-    clear(jobsBox, el('table', {}, el('thead', {}, el('tr', {}, ['Job', 'Schedule', 'Last run', ''].map((h) => el('th', { text: h })))),
+    clear(jobsBox, el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Job', 'Schedule', 'Last run', ''].map((h) => el('th', { text: h })))),
       el('tbody', {}, jobs.map((j) => el('tr', {},
         el('td', {}, el('div', { text: j.name }), el('div', { class: 'faint', text: j.description })),
         el('td', { class: 'mono', text: j.cron }),
         el('td', {}, j.last_run ? [el('span', { class: `badge ${j.last_run.ok ? 'ok' : 'danger'}`, text: j.last_run.ok ? 'OK' : 'FAILED' }), ' ', el('span', { class: 'faint', text: timeAgo(j.last_run.started_at) })] : el('span', { class: 'faint', text: 'never' })),
         el('td', {}, el('button', { class: 'btn small', type: 'button', onClick: async () => {
-          try { await api(`/api/jobs/${j.id}/run`, { method: 'POST' }); toast(`${j.name} ran`, 'ok'); await loadJobs(); } catch (e) { toast(e.message, 'error'); } } }, 'Run now')))))));
+          try { await api(`/api/jobs/${j.id}/run`, { method: 'POST' }); toast(`${j.name} ran`, 'ok'); await loadJobs(); } catch (e) { toast(e.message, 'error'); } } }, 'Run now'))))))));
   }
 
   async function loadDevices() {
