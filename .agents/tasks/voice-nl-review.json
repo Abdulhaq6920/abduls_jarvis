@@ -1,0 +1,12 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "minor",
+      "file": "tests/unit/test_config_and_crypto.py",
+      "detail": "Full suite shows 1 failure: test_dev_allows_missing_secrets_but_reports_them expects {jwt_secret_weak, data_key_missing} findings but gets none. This is confirmed PRE-EXISTING and UNRELATED to the voice work: it exercises the backend jarvis_backend Settings class (not the local-agent config.py the voice diff edits), and it fails because a gitignored, untracked repo-root .env (created by an earlier non-voice step) now supplies a strong JWT_SECRET/DATA_KEY, suppressing the dev-mode weak-secret warnings. No voice-feature file touches config/crypto; all voice tests pass.",
+      "fix": "Out of scope for this feature. Either run the suite with the real .env moved/unset, or make the test env-isolated (e.g. clear JWT_SECRET/DATA_KEY and point env_file away) so it does not depend on working-tree .env state. Reconcile the stated baseline (313 passed / 9 skipped) with current working-tree reality (extra alembic-import skip and this .env-driven failure both come from unrelated in-flight work)."
+    }
+  ],
+  "summary": "FEAT-001 (dashboard mic + BCP-47 language select, Web Speech only, no CSP/innerHTML/CDN, graceful SR-absent degradation, speakPreview language override) and FEAT-002 (configurable Vosk model lang/path, wake grammar derived from wake_phrase with energy gate intact, SAPI voice hint, side-effect-free import, single-MicStream ownership) meet all acceptance criteria and task constraints. The 6 new voice tests plus all other voice-related tests pass; the lone suite failure is a pre-existing, out-of-scope .env-driven backend crypto test with no connection to the voice diff."
+}

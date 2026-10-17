@@ -1,0 +1,7 @@
+{
+  "task_id": "task-voice-nl",
+  "task_description": "Add a natural-language voice button to the dashboard (browser Web Speech API: speech input + spoken reply, configurable BCP-47 language) and make the desktop 'Hey JARVIS' Vosk/SAPI voice runtime language-configurable, with docs and Python unit tests. No CSP/contract regressions; Web Speech API only; single-MicStream ownership and wake energy gate preserved.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}
