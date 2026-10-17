@@ -20,8 +20,11 @@ def test_explicit_delegation_and_voice(client, admin):
 
 
 def test_agents_never_claim_work_they_did_not_do(client, admin):
-    """Honesty: with no web search / Gmail / LLM connected, the agents must say so."""
-    assert "isn't connected" in say(client, admin, "ask SHURI to research agent security")["speech"]
+    """Honesty: with search disabled / Gmail / LLM not connected, the agents must say so."""
+    # SHURI's search is wired but DisabledSearch by default: it must say it found nothing /
+    # isn't configured, never fabricate a finding or URL.
+    shuri = say(client, admin, "ask SHURI to research agent security")["speech"]
+    assert "nothing" in shuri.lower() or "not configured" in shuri.lower()
     assert "isn't connected" in say(client, admin, "check my Gmail")["speech"]
     # VISION now answers via the default offline EchoLLM: a real (if deterministic) reply,
     # never the old "no language model" stub.

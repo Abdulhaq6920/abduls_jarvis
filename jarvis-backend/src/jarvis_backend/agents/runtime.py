@@ -19,6 +19,7 @@ from jarvis_shared.agents import AgentId, AgentSpec
 from jarvis_shared.security import RiskLevel, ToolRequest
 
 from jarvis_backend.core.llm import LLMMessage, LLMProvider
+from jarvis_backend.core.search import SearchProvider, SearchResult
 from jarvis_backend.storage.memory import MemoryFull, MemoryStore
 
 
@@ -34,6 +35,7 @@ class AgentServices:
 
     memory: MemoryStore
     llm: LLMProvider
+    search: SearchProvider
 
 
 class BaseAgent:
@@ -74,11 +76,48 @@ class JarvisAgent(BaseAgent):
 
 
 class ShuriAgent(BaseAgent):
+    """Research agent: web search -> LLM synthesis. SPEECH ONLY (read-only research).
+
+    SEAM (now wired): search is config-driven via :class:`SearchProvider`, ``DisabledSearch``
+    by default (``JARVIS_SEARCH_PROVIDER=none``). SHURI never emits a ``ToolRequest`` -- it
+    only speaks -- so research can never touch the user's machine or bypass the policy gate.
+    """
+
+    _RESULT_LIMIT = 5
+
     async def handle(self, task: str, context: Dict[str, Any]) -> AgentOutcome:
         topic = _topic_after(task, ["research", "investigate", "find out", "look into"])
-        # SEAM: call a web-search tool + LLM synthesis here and speak the real findings.
-        return AgentOutcome(f"I'd research {topic}, but web search isn't connected yet, so I "
-                            f"have no findings to report.")
+        results = await self.services.search.search(topic, limit=self._RESULT_LIMIT)
+        if not results:
+            # Honest empty branch: say nothing was found / search isn't configured. Never
+            # fabricate a finding or a URL.
+            return AgentOutcome(f"I searched for {topic}, but web search returned nothing (it may "
+                                f"not be configured), so I have no findings to report.")
+        messages = [
+            LLMMessage(role="system", content=self._system_prompt()),
+            LLMMessage(role="user", content=self._user_prompt(topic, results)),
+        ]
+        reply = await self.services.llm.complete(messages)
+        return AgentOutcome(reply.strip())
+
+    def _system_prompt(self) -> str:
+        personality = ", ".join(self.spec.personality) or "analytical"
+        return "\n".join([
+            f"You are {self.spec.display_name}, a {personality} research assistant.",
+            f"Your role: {self.spec.role}",
+            "Synthesise ONLY what the provided sources state. Cite nothing that is not present "
+            "in them, and never invent URLs or facts. If the sources are thin, say so.",
+            "Keep the answer concise and spoken-friendly (a few sentences, no markdown).",
+        ])
+
+    @staticmethod
+    def _user_prompt(topic: str, results: List[SearchResult]) -> str:
+        lines = [f"Research topic: {topic}", "", "Sources:"]
+        for i, r in enumerate(results, start=1):
+            lines.append(f"{i}. {r.title[:120]} ({r.url[:200]}) -- {r.snippet[:300]}")
+        lines.append("")
+        lines.append("Give a brief spoken synthesis of what these sources say about the topic.")
+        return "\n".join(lines)
 
 
 class TonyAgent(BaseAgent):

@@ -136,6 +136,19 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 30.0
     llm_max_tokens: int = 512
 
+    # --- search --------------------------------------------------------------------
+    # Which web-search engine SHURI's research uses. "none" is the disabled default used in
+    # dev and tests (no network, no key). "duckduckgo"/"generic" talk to a DuckDuckGo-shaped
+    # (or SearxNG) JSON endpoint via GenericJsonSearch; disabled is a valid state.
+    search_provider: Literal["none", "duckduckgo", "generic"] = "none"
+    # Search endpoint base URL, e.g. https://api.duckduckgo.com/ or a SearxNG /search URL.
+    # Empty with a non-none provider falls back to DisabledSearch (see build_search).
+    search_base_url: str = ""
+    # Optional: most engines (DuckDuckGo) need none; a keyed engine sends it as a Bearer header.
+    search_api_key: Optional[SecretStr] = None
+    search_timeout_seconds: float = 10.0
+    search_max_results: int = 5
+
     # --- observability -------------------------------------------------------------
     log_level: str = "INFO"
     log_format: Literal["text", "json"] = "text"
@@ -179,6 +192,10 @@ class Settings(BaseSettings):
     @property
     def llm_base_url_value(self) -> str:
         return self.llm_base_url.strip().rstrip("/")
+
+    @property
+    def search_base_url_value(self) -> str:
+        return self.search_base_url.strip().rstrip("/")
 
     def secret(self, name: str) -> str:
         value = getattr(self, name)
@@ -240,6 +257,24 @@ class Settings(BaseSettings):
                                             "remote host; the prompt (and any JARVIS_LLM_API_KEY) would "
                                             "travel in cleartext. Use an https:// base URL for hosted "
                                             "providers (loopback http:// is allowed for local Ollama).")
+        if self.search_provider != "none" and self.search_base_url_value:
+            # A remote plaintext http:// search endpoint leaks the query text (and any Bearer
+            # key) on the wire -- confidentiality must not depend on whether a key is set.
+            # Loopback http:// (local SearxNG) stays allowed. A malformed URL makes urlparse
+            # raise -- treat it as unsafe (fail closed) rather than aborting config validation.
+            # NB: "none" (disabled) is a valid state and produces NO finding.
+            try:
+                parsed = urlparse(self.search_base_url_value)
+                _ = parsed.port  # non-numeric port raises ValueError lazily; force it here
+                search_plaintext_remote = parsed.scheme == "http" and (parsed.hostname or "") not in _LLM_LOOPBACK_HOSTS
+            except ValueError:
+                search_plaintext_remote = True
+            if search_plaintext_remote:
+                err("search_plaintext_remote", "JARVIS_SEARCH_BASE_URL is a plaintext HTTP endpoint on "
+                                               "a remote host; the query (and any JARVIS_SEARCH_API_KEY) "
+                                               "would travel in cleartext. Use an https:// base URL for "
+                                               "hosted engines (loopback http:// is allowed for local "
+                                               "SearxNG).")
         if self.redis_url_value.startswith("redis://") and self.is_prod:
             host = urlparse(self.redis_url_value).hostname or ""
             if host not in _PRIVATE_DB_HOSTS:

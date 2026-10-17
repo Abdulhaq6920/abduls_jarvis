@@ -43,16 +43,18 @@ Defined in `jarvis-shared/src/jarvis_shared/agents.py`; behaviour in
 | **FRIDAY** | Local computer operator | Open allow-listed apps; file/terminal ops via `ToolRequest`. | 🟡 | open, run, launch, type, click, file |
 | **TONY** | Developer / engineering | Inspect a repo (`git status --short`) in an approved project path. | ✅ | project, code, build, git, repo, deploy, test |
 | **WONG** | Memory keeper | "remember that …" stores a fact; "what do you remember about …" recalls it. Encrypted at rest. | ✅ | remember, recall, note, document |
-| **SHURI** | Research / web | Investigate a topic and synthesise findings. | ⛔ (SEAM: web search + LLM) | research, investigate, latest, search, web |
+| **SHURI** | Research / web | Investigate a topic and synthesise findings (speech only, read-only). | 🟡 (search wired; disabled by default, enable via `JARVIS_SEARCH_*`; LLM synthesis via Phase 1 provider) | research, investigate, latest, search, web |
 | **NATASHA** | Communications | Read inbox / send email / calendar via Google OAuth. Sends are RESTRICTED→approval. | ⛔ (SEAM: Google OAuth) | email, gmail, inbox, calendar, reply, meeting |
 | **VISION** | Analysis & reasoning | Analyse data/documents with an LLM. | ✅ (LLM wired; `EchoLLM` offline default) | analyze, explain, reason, evaluate, compare |
 | **DR. STRANGE** | Strategy & planning | Multi-step plans / roadmaps with an LLM. | ✅ (LLM wired; `EchoLLM` offline default) | plan, strategy, roadmap, steps, scenario |
 | **QUICKSILVER** | Background jobs | LLM-reasoned plans for recurring/background work (scheduler wiring is Phase 2). | ✅ (LLM reasoning; scheduler ⛔) | schedule, every, background, recurring, daily |
 | **NICK FURY** | Security gatekeeper | Appears in the trace whenever an action is held or blocked. | ✅ | approve, permission, security, danger |
 
-**Honesty rule:** an unconnected skill says so out loud instead of pretending. SHURI with no search
-connected replies that it has no findings to report. This is enforced by the `# SEAM` markers in
-`runtime.py` — connect the integration there to turn the skill on.
+**Honesty rule:** an unconnected (or disabled) skill says so out loud instead of pretending. SHURI
+with search disabled (the default `JARVIS_SEARCH_PROVIDER=none`) replies that it found nothing / is
+not configured, and never fabricates a finding or URL. Enabling `JARVIS_SEARCH_*` turns on real
+search + LLM synthesis. The remaining `# SEAM` markers in `runtime.py` (e.g. NATASHA's Gmail) work
+the same way — connect the integration there to turn the skill on.
 
 ## 3. Tool categories (what a skill may ask the PC to do)
 
@@ -68,7 +70,7 @@ Every `ToolRequest` carries a `category`. The local validator
 | `application` | `open_app` | RESTRICTED → approval; bare name only, must be on the PC's app allow-list | ✅ |
 | `keyboard` / `mouse` / `screen` | GUI automation | RESTRICTED → approval | 🟡 the validator classifies these, but the executor (`tools.py`) has **no handler** — a request falls to "control is not implemented". Declared, not runnable. |
 | `gmail` / `calendar` | read vs `send_email`/mutate | reads SAFE; sends/mutations RESTRICTED → approval | ⛔ (SEAM: OAuth) |
-| `browser` | web fetch/search | — | ⛔ (SEAM) |
+| `browser` | web fetch/search | — | 🟡 SHURI's web search is now wired via `SearchProvider` (`core/search.py`), read-only and **speech only** — no `ToolRequest`. Disabled by default; enable via `JARVIS_SEARCH_*`. |
 
 ### Command classification (the heart of terminal safety)
 
@@ -92,6 +94,7 @@ Behind Protocols; swap dev stubs for production engines with env vars. See
 | Speech-to-text | `STTProvider` (`stt.py`, `voice_local.py`) | text source | **Vosk** (default real stack) · faster-whisper (`voice-alt`) | `JARVIS_STT_ENGINE=whisper` |
 | Text-to-speech | `TTSProvider` (`tts.py`, `voice_local.py`) | prints line + voice id | **Windows SAPI via pyttsx3** (default real stack) · Azure / ElevenLabs / Piper | `JARVIS_TTS_ENGINE=pyttsx3` |
 | LLM | `LLMProvider` (`core/llm.py`) | `EchoLLM` | OpenAI / Ollama (OpenAI-compatible) | `JARVIS_LLM_PROVIDER=openai\|ollama`, `JARVIS_LLM_BASE_URL`, `JARVIS_LLM_API_KEY` |
+| Search | `SearchProvider` (`core/search.py`) | `DisabledSearch` | DuckDuckGo / generic JSON (SearxNG) | `JARVIS_SEARCH_PROVIDER=duckduckgo\|generic`, `JARVIS_SEARCH_BASE_URL` |
 | Router | `Router` (`core/router.py`) | `KeywordRouter` | `LangGraphRouter` | implement Protocol |
 | Scheduler | APScheduler (`jobs.py`) | in-process | persistent store / Celery / RQ | config |
 

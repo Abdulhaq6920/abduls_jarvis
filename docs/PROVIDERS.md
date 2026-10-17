@@ -116,6 +116,49 @@ is unaffected.
 `jarvis_backend/core/router.py` ships `KeywordRouter`. A `LangGraphRouter` implementing the
 `Router` Protocol can replace it; the supervisor is agnostic.
 
+## Web search — `SearchProvider`
+
+`jarvis_backend/core/search.py` ships two `SearchProvider` implementations and a factory,
+mirroring the LLM seam:
+
+- `DisabledSearch` — the offline default. No network, no key; `search(...)` returns an empty
+  list (never fabricated results). SHURI then honestly reports it found nothing.
+- `GenericJsonSearch` — the real provider over `httpx`. It GETs a DuckDuckGo-shaped JSON
+  endpoint and maps the instant-answer abstract plus `RelatedTopics` (recursing one level into
+  grouped topics) into `SearchResult(title, url, snippet)`, capped to the limit. The default
+  engine is the **DuckDuckGo Instant Answer API** (`https://api.duckduckgo.com/`), which is
+  keyless and HTTPS, so it works out of the box; the same class also covers a **SearxNG**
+  `/search?format=json` endpoint (change `JARVIS_SEARCH_BASE_URL`). A Bearer header is sent
+  only when a key is configured.
+- `build_search(settings)` — returns `DisabledSearch` for `JARVIS_SEARCH_PROVIDER=none`
+  (default) and for a real provider with no base URL; otherwise a `GenericJsonSearch`.
+
+SHURI calls `services.search.search(topic)` and, when results come back, asks
+`services.llm.complete(...)` for a brief spoken synthesis under an honesty rule (synthesise
+only what the sources state, invent no URLs or facts). SHURI returns **speech only** — never a
+`ToolRequest` — so research is read-only and can never touch the machine. On empty results it
+says so honestly rather than fabricating. DuckDuckGo IA is an instant-answer service, not a
+ranked-link index, so some topics legitimately return nothing.
+
+**Error policy:** `GenericJsonSearch.search` never raises. On any transport, HTTP-status, JSON
+or shape error it logs only the error class (never the query text or the key) and returns an
+empty list, so a search outage never 500s an `/assist` request.
+
+**Transport safety:** the query is only ever sent over `https://` or to a loopback host. If
+`JARVIS_SEARCH_BASE_URL` is a remote `http://` endpoint the provider refuses the request —
+whether or not an API key is set — so neither the query nor a Bearer `JARVIS_SEARCH_API_KEY` is
+transmitted in plaintext; in `prod`, `check-config` fails closed on that configuration.
+Loopback `http://` (local SearxNG) is unaffected. `provider=none` is a valid disabled state and
+never produces a finding.
+
+| Env | Default | Effect |
+| --- | --- | --- |
+| `JARVIS_SEARCH_PROVIDER` | `none` | `none` (disabled) \| `duckduckgo` \| `generic`. |
+| `JARVIS_SEARCH_BASE_URL` | *(empty)* | DuckDuckGo `https://api.duckduckgo.com/`; SearxNG `/search`. Empty ⇒ falls back to `DisabledSearch`. |
+| `JARVIS_SEARCH_API_KEY` | *(unset)* | `SecretStr`; DuckDuckGo needs none; sent as Bearer for a keyed engine. |
+| `JARVIS_SEARCH_TIMEOUT_SECONDS` | `10` | Per-request timeout. |
+| `JARVIS_SEARCH_MAX_RESULTS` | `5` | Cap on results synthesised. |
+
 ## Scheduler
 
 `jarvis_backend/scheduler.py` uses APScheduler in-process. For durability across

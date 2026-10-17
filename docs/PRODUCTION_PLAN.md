@@ -29,8 +29,9 @@ PC) mean no single compromised component can act on its own.
    hard block (destructive command, out-of-allow-list path, malformed request). The local gate can
    refuse something the backend allowed; it can never loosen a decision.
 3. **Audio stays local.** Microphone audio never leaves the PC. Only text crosses the network.
-4. **Honesty rule.** An agent never claims work it did not do. Unconnected capabilities say so out
-   loud (SHURI: "web search isn't connected yet"), marked with `# SEAM` in the code.
+4. **Honesty rule.** An agent never claims work it did not do. Unconnected or disabled capabilities
+   say so out loud (SHURI with search disabled: "web search returned nothing / isn't configured"),
+   marked with `# SEAM` in the code.
 5. **Everything replaceable.** Wake word, STT, TTS, LLM, Router, and Scheduler all sit behind
    Protocols. Swapping a dev stub for a production engine is configuration + an adapter, never a
    supervisor rewrite.
@@ -86,7 +87,7 @@ The supervisor **only decides**; it never executes tools itself.
 | Approvals (human grants, device executes, exactly once) | ✅ | Atomic claim; grants expire; separation of duties enforced. |
 | Long-term memory ("remember that…"), encrypted at rest | ✅ | WONG; field-level Fernet encryption. |
 | Dashboard (voice console, agents, memory, approvals, health, audit) | ✅ | Calm "AI-OS" UI, strict CSP, no token in web storage. |
-| Web research (SHURI) | ⛔ | SEAM: wire a web-search tool + LLM synthesis. |
+| Web research (SHURI) | 🟡 | Search wired via `SearchProvider` (`core/search.py`) → LLM synthesis; config-driven and **disabled by default** (`JARVIS_SEARCH_PROVIDER=none`), enable via `JARVIS_SEARCH_*`. Honest empty result; speech only. |
 | Gmail / Calendar (NATASHA) | ⛔ | SEAM: Google OAuth; reads SAFE, sends RESTRICTED→approval. |
 | LLM reasoning (VISION, DR. STRANGE, QUICKSILVER, NICK FURY) | ⛔ | SEAM: inject a configured `LLMProvider`. |
 | GUI automation (keyboard / mouse / screen) | ⛔ | Validator treats these as RESTRICTED→approval; executor not wired. |
@@ -117,7 +118,9 @@ Each phase is independently shippable. Earlier phases are prerequisites for late
 - **Exit:** end-to-end "Hey JARVIS → spoken answer" with no typed input (works today on Windows).
 
 ### Phase 3 — External integrations (through the gate)
-- SHURI: web search tool → LLM synthesis.
+- SHURI: web search tool → LLM synthesis. ✅ (Phase 3a) — `SearchProvider` in `core/search.py`
+  (keyless DuckDuckGo default / generic SearxNG), threaded through `AgentServices`; config-driven
+  and disabled by default; honest on empty results; speech only (no `ToolRequest`).
 - NATASHA: Google OAuth (minimal scopes); inbox/calendar reads SAFE, sends RESTRICTED→approval.
 - **Rule:** every integration goes through propose → approve → execute. No shortcuts.
 - **Exit:** a research request and a "send email" request both run the full approval path.
