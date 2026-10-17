@@ -29,6 +29,24 @@ def test_config_reads_vosk_env(monkeypatch):
     assert cfg.tts_voice_hint == "hortense"
 
 
+def test_config_reads_no_speech_timeout(monkeypatch):
+    monkeypatch.delenv("JARVIS_NO_SPEECH_TIMEOUT_S", raising=False)
+    assert RuntimeConfig(_env_file=None).no_speech_timeout_s == 3.0
+    monkeypatch.setenv("JARVIS_NO_SPEECH_TIMEOUT_S", "2")
+    assert RuntimeConfig(_env_file=None).no_speech_timeout_s == 2.0
+
+
+def test_stt_accepts_no_speech_window():
+    """The STT provider carries a no-speech window so a false/empty wake idles quickly
+    (returning empty) instead of blocking the full max_seconds. Constructing it must not
+    open a mic or load a model (both are lazy)."""
+    from jarvis_local_agent.voice_local import VoskSTTProvider
+
+    stt = VoskSTTProvider(object(), max_seconds=12.0, no_speech_seconds=0.5)
+    assert stt.no_speech_seconds == 0.5
+    assert stt.no_speech_seconds < stt.max_seconds
+
+
 # ------------------------------------------------------------------- wake grammar
 def test_wake_grammar_derives_from_custom_phrase():
     # Constructing the engine does not open the mic or import vosk; _grammar() is pure.

@@ -37,6 +37,9 @@ class RuntimeConfig(BaseSettings):
     wake_phrase: str = "hey jarvis"
     wake_sensitivity: float = 0.5
     conversation_timeout_s: float = 12.0
+    # After waking, if NO speech is detected within this many seconds, return to IDLE
+    # quietly instead of blocking the full capture window (handles false/empty wakes).
+    no_speech_timeout_s: float = 3.0
     wake_engine: str = "dev"
     stt_engine: str = "dev"
     tts_engine: str = "dev"

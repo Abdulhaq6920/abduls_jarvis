@@ -282,16 +282,20 @@ class VoskSTTProvider:
     """
 
     def __init__(self, mic: MicStream, max_seconds: float = 12.0,
-                 silence_seconds: float = 1.4, vosk_model_lang: str = "en-us",
-                 vosk_model_path: str = "") -> None:
+                 silence_seconds: float = 1.4, no_speech_seconds: float = 3.0,
+                 vosk_model_lang: str = "en-us", vosk_model_path: str = "") -> None:
         self.mic = mic
         self.max_seconds = max_seconds
         self.silence_seconds = silence_seconds
+        # If NO speech is detected at all within this window after waking, give up and
+        # return empty so the runtime drops straight back to IDLE instead of blocking for
+        # the full max_seconds. This is what makes a false/empty wake go idle quickly.
+        self.no_speech_seconds = no_speech_seconds
         self.vosk_model_lang = vosk_model_lang
         self.vosk_model_path = vosk_model_path
 
     def capture_utterance(self) -> str:
-        """Blocking capture of one spoken request. Returns transcribed text."""
+        """Blocking capture of one spoken request. Returns transcribed text (empty on silence)."""
         from vosk import KaldiRecognizer
 
         rec = KaldiRecognizer(get_model(self.vosk_model_lang, self.vosk_model_path), SAMPLE_RATE)
@@ -302,8 +306,13 @@ class VoskSTTProvider:
         last_voice = time.time()
         partial_seen = ""
         final_text = ""
+        heard_speech = False  # has ANY partial/final text appeared yet?
 
         while time.time() - started < self.max_seconds:
+            # No speech at all within the opening window -> idle fast (false/empty wake).
+            if not heard_speech and time.time() - started > self.no_speech_seconds:
+                break
+
             frame = self.mic.read(timeout=0.4)
             if not frame:
                 if partial_seen and time.time() - last_voice > self.silence_seconds:
@@ -313,6 +322,7 @@ class VoskSTTProvider:
             if rec.AcceptWaveform(frame):
                 chunk = json.loads(rec.Result()).get("text", "").strip()
                 if chunk:
+                    heard_speech = True
                     final_text = (final_text + " " + chunk).strip()
                     last_voice = time.time()
                     # Vosk marked end of utterance and we have content -> done.
@@ -320,6 +330,7 @@ class VoskSTTProvider:
             else:
                 p = json.loads(rec.PartialResult()).get("partial", "").strip()
                 if p and p != partial_seen:
+                    heard_speech = True
                     partial_seen = p
                     last_voice = time.time()
                 elif partial_seen and time.time() - last_voice > self.silence_seconds:

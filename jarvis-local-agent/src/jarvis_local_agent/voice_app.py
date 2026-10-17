@@ -118,6 +118,7 @@ class VoiceApp:
                                   vosk_model_lang=self.config.vosk_model_lang,
                                   vosk_model_path=self.config.vosk_model_path)
         stt = VoskSTTProvider(self.mic,
+                              no_speech_seconds=self.config.no_speech_timeout_s,
                               vosk_model_lang=self.config.vosk_model_lang,
                               vosk_model_path=self.config.vosk_model_path)
         try:
