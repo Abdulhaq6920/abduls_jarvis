@@ -65,40 +65,58 @@ class UserStore:
             await s.execute(update(UserRow).where(UserRow.id == user_id).values(**values))
 
     # ---------------------------------------------------------------------------- mfa
-    async def set_mfa_pending(self, user_id: str, secret: str) -> None:
-        """Store a freshly generated (unconfirmed) TOTP secret; MFA is NOT yet enabled."""
+    #
+    # The MFA factor is one state machine guarded by ``mfa_state_version``. Every
+    # transition reads the current version, then issues a conditional UPDATE whose WHERE
+    # clause pins that version and bumps it. The checked ``rowcount == 1`` is the
+    # single-winner guarantee that works IDENTICALLY on SQLite and PostgreSQL -- it does
+    # NOT rely on ``SELECT ... FOR UPDATE`` (which SQLite silently ignores). A caller that
+    # read a stale version loses the UPDATE (0 rows) and fails closed.
+    async def set_mfa_pending(self, user_id: str, secret: str) -> bool:
+        """Store a freshly generated (unconfirmed) TOTP secret; MFA is NOT yet enabled.
+
+        Refused (returns False) once the account already has MFA enabled, so a stale
+        enrollment that began while the account was disabled cannot commit after a
+        concurrent confirmation and clear the just-activated factor. Fail closed."""
         async with self._db.session() as s:
-            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(False)).values(
                 mfa_secret=secret, mfa_enabled=False, mfa_last_counter=None,
-                mfa_recovery_hashes=None))
+                mfa_recovery_hashes=None,
+                mfa_state_version=UserRow.mfa_state_version + 1))
+            return res.rowcount == 1
 
     async def enable_mfa(self, user_id: str, recovery_hashes: List[str], *,
                          expected_secret: str, last_counter: Optional[int] = None) -> bool:
         """Flip MFA on after a correct code confirmed the pending secret.
 
-        Bound to the EXACT secret that was verified: the row is read FOR UPDATE and the
-        transition only happens if it is still pending AND its secret is still
-        ``expected_secret``. This closes the confirmation race -- a concurrent
-        ``set_mfa_pending`` that replaced secret A with secret B after the caller verified
-        A can no longer be enabled on A's proof; the mismatched caller returns False and
-        shows nothing. The row lock also serialises two concurrent confirmations so only
-        one can enable + reveal a recovery set. ``last_counter`` is the matched
-        confirmation counter, persisted atomically so that code cannot be replayed."""
+        Bound to the EXACT secret verified AND to the version read at the start: the row is
+        read, checked in Python (still pending, same secret), then a conditional UPDATE
+        pins ``mfa_state_version`` and ``mfa_enabled=False`` and bumps the version. Two
+        concurrent confirmations read the same version but only one UPDATE affects a row
+        (``rowcount == 1``); the loser returns False and reveals no recovery set. A
+        concurrent ``set_mfa_pending`` that swapped the secret bumped the version too, so
+        this enable sees either a different version or a different secret and fails closed."""
         async with self._db.session() as s:
-            row = (await s.execute(select(UserRow).where(UserRow.id == user_id)
-                                   .with_for_update())).scalar_one_or_none()
+            row = (await s.execute(
+                select(UserRow).where(UserRow.id == user_id))).scalar_one_or_none()
             if row is None or row.mfa_enabled or row.mfa_secret != expected_secret:
                 return False
-            row.mfa_enabled = True
-            row.mfa_recovery_hashes = list(recovery_hashes)
-            row.mfa_last_counter = last_counter
-            return True
+            version = row.mfa_state_version
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(False),
+                UserRow.mfa_state_version == version).values(
+                mfa_enabled=True, mfa_recovery_hashes=list(recovery_hashes),
+                mfa_last_counter=last_counter,
+                mfa_state_version=UserRow.mfa_state_version + 1))
+            return res.rowcount == 1
 
     async def disable_mfa(self, user_id: str) -> None:
         async with self._db.session() as s:
             await s.execute(update(UserRow).where(UserRow.id == user_id).values(
                 mfa_secret=None, mfa_enabled=False, mfa_last_counter=None,
-                mfa_recovery_hashes=None))
+                mfa_recovery_hashes=None,
+                mfa_state_version=UserRow.mfa_state_version + 1))
 
     async def advance_mfa_counter(self, user_id: str, counter: int,
                                   previous: Optional[int]) -> bool:
@@ -125,21 +143,28 @@ class UserStore:
     async def consume_recovery_hash(self, user_id: str, expected_hash: str) -> bool:
         """Remove a single recovery-code hash (single-use), keyed by the matched hash.
 
-        Atomic read-modify-write under a row lock: the row is selected FOR UPDATE so two
-        parallel logins presenting the same code serialize on it -- the first removes the
-        hash and commits, the second re-reads, finds it gone, and returns False. Removing
-        by VALUE, not index, also avoids deleting the wrong code after a list shift. The
-        recovery list is a field-encrypted opaque blob, so the compare-and-set cannot be
-        pushed into SQL; the row lock is what makes it safe on a concurrent backend."""
+        The recovery list is a field-encrypted opaque blob, so the removal cannot be
+        pushed into SQL. Instead it is a version compare-and-set: read the row and its
+        ``mfa_state_version``, remove the matched hash by VALUE in Python (never by index,
+        which would shift), then UPDATE only if the version is unchanged, bumping it. Two
+        parallel logins presenting the same code read the same version and the same list,
+        but exactly one UPDATE affects a row (``rowcount == 1``) -- the first spends the
+        code, the loser's stale-version UPDATE touches nothing and returns False. Portable:
+        no ``FOR UPDATE`` (which SQLite ignores), so single-use holds on SQLite too."""
         async with self._db.session() as s:
             row = (await s.execute(
-                select(UserRow).where(UserRow.id == user_id).with_for_update())).scalar_one_or_none()
+                select(UserRow).where(UserRow.id == user_id))).scalar_one_or_none()
             hashes = list(row.mfa_recovery_hashes or []) if row else []
             if row is None or expected_hash not in hashes:
                 return False
+            version = row.mfa_state_version
             hashes.remove(expected_hash)
-            row.mfa_recovery_hashes = hashes
-            return True
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id,
+                UserRow.mfa_state_version == version).values(
+                mfa_recovery_hashes=hashes,
+                mfa_state_version=UserRow.mfa_state_version + 1))
+            return res.rowcount == 1
 
 
 # ------------------------------------------------------------------------- sessions

@@ -153,8 +153,13 @@ ALTER TABLE users ADD COLUMN mfa_secret TEXT;
 ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN mfa_last_counter INTEGER;
 ALTER TABLE users ADD COLUMN mfa_recovery_hashes TEXT;
+ALTER TABLE users ADD COLUMN mfa_state_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN step_up_at TIMESTAMPTZ;
 ```
+
+`mfa_state_version` is the compare-and-set generation that keeps MFA enrollment, enablement
+and recovery-code consumption atomic across concurrent requests on every backend (SQLite
+included); it must default to `0` for existing rows.
 
 ## Incident response
 

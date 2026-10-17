@@ -1,7 +1,8 @@
 """Persistence layer: audit chain integrity, approval state machine, memory, stats."""
 import asyncio
 
-from jarvis_backend.storage import ApprovalStore, AuditLog, MemoryStore, TurnStore
+from jarvis_backend.auth.passwords import hash_password
+from jarvis_backend.storage import ApprovalStore, AuditLog, MemoryStore, TurnStore, UserStore
 from sqlalchemy import text
 
 # --------------------------------------------------------------------------- audit
@@ -135,3 +136,81 @@ async def test_agent_stats(db):
     assert stats["SHURI"].turns == 2
     assert stats["SHURI"].avg_latency_ms == 200.0
     assert stats["SHURI"].last_active.tzinfo is not None
+
+
+# ----------------------------------------------------------------------- mfa one-time state
+#
+# These prove the version compare-and-set gives single-winner on SQLITE -- the exact
+# backend the review flagged, because its dialect emits no ``SELECT ... FOR UPDATE``. Each
+# test forces the "both callers read the SAME state before either writes" interleaving
+# (via a shared read or ``asyncio.gather``), so the guarantee comes from the checked
+# ``rowcount``, not from scheduling luck or a lock the backend ignores.
+
+
+async def _mfa_user(db) -> str:
+    users = UserStore(db)
+    user = await users.create("mfauser", await hash_password("pw correct horse battery"))
+    return user.id
+
+
+async def test_set_mfa_pending_refuses_once_enabled(db):
+    """Finding #1: a stale enrollment write cannot clear an already-enabled factor."""
+    users = UserStore(db)
+    uid = await _mfa_user(db)
+    assert await users.set_mfa_pending(uid, "SECRETAAAAAAAAAA") is True
+    assert await users.enable_mfa(uid, ["r1"], expected_secret="SECRETAAAAAAAAAA",
+                                  last_counter=1) is True
+    # A later pending write (request that began while disabled) must be refused, and must
+    # NOT reset mfa_enabled or wipe the secret/recovery state.
+    assert await users.set_mfa_pending(uid, "LATEAAAAAAAAAAAA") is False
+    row = await users.by_id(uid)
+    assert row.mfa_enabled is True and row.mfa_secret == "SECRETAAAAAAAAAA"
+    assert row.mfa_recovery_hashes == ["r1"]
+
+
+async def test_enable_mfa_single_winner_on_shared_version(db):
+    """Finding #2 (enable): two confirmations reading the SAME pending version -- only one
+    enables and reveals its recovery set; the loser's stale-version UPDATE touches no row."""
+    users = UserStore(db)
+    uid = await _mfa_user(db)
+    await users.set_mfa_pending(uid, "SHAREDSECRETAAAA")
+    # Both callers read the same version before either writes.
+    results = await asyncio.gather(
+        users.enable_mfa(uid, ["setA"], expected_secret="SHAREDSECRETAAAA", last_counter=1),
+        users.enable_mfa(uid, ["setB"], expected_secret="SHAREDSECRETAAAA", last_counter=1),
+    )
+    assert sum(bool(r) for r in results) == 1
+    row = await users.by_id(uid)
+    assert row.mfa_enabled is True
+    assert row.mfa_recovery_hashes in (["setA"], ["setB"])  # one winner, never merged
+
+
+async def test_recovery_consume_single_winner_on_shared_version(db):
+    """Finding #2 (recovery): two redemptions of the same hash reading the same version --
+    exactly one succeeds and exactly one hash is removed, on SQLite without FOR UPDATE."""
+    users = UserStore(db)
+    uid = await _mfa_user(db)
+    await users.set_mfa_pending(uid, "SHAREDSECRETBBBB")
+    await users.enable_mfa(uid, ["h1", "h2", "h3"], expected_secret="SHAREDSECRETBBBB",
+                           last_counter=1)
+    results = await asyncio.gather(
+        users.consume_recovery_hash(uid, "h2"),
+        users.consume_recovery_hash(uid, "h2"),
+    )
+    assert sum(bool(r) for r in results) == 1
+    remaining = (await users.by_id(uid)).mfa_recovery_hashes
+    assert sorted(remaining) == ["h1", "h3"]  # exactly one copy of h2 removed
+
+
+async def test_enable_mfa_loses_to_a_concurrent_re_pending(db):
+    """Version CAS also catches a swapped secret: a confirmation whose version was advanced
+    by a concurrent ``set_mfa_pending`` fails closed rather than enabling on a stale proof."""
+    users = UserStore(db)
+    uid = await _mfa_user(db)
+    await users.set_mfa_pending(uid, "FIRSTSECRETAAAAA")
+    # A concurrent re-enrollment bumps the version and swaps the secret...
+    await users.set_mfa_pending(uid, "SECONDSECRETAAAA")
+    # ...so enabling on the first proof is refused (wrong secret / advanced version).
+    assert await users.enable_mfa(uid, ["r"], expected_secret="FIRSTSECRETAAAAA",
+                                  last_counter=1) is False
+    assert (await users.by_id(uid)).mfa_enabled is False

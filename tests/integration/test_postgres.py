@@ -10,7 +10,15 @@ import pytest
 from cryptography.fernet import Fernet
 from jarvis_backend.config import Settings
 from jarvis_backend.crypto import FieldCipher, set_cipher
-from jarvis_backend.storage import ApprovalStore, AuditLog, Database, MemoryStore, TurnStore
+from jarvis_backend.auth.passwords import hash_password
+from jarvis_backend.storage import (
+    ApprovalStore,
+    AuditLog,
+    Database,
+    MemoryStore,
+    TurnStore,
+    UserStore,
+)
 
 
 @pytest.fixture(scope="module")
@@ -79,3 +87,57 @@ async def test_timestamps_are_timezone_aware_and_stats_aggregate(pg):
     await turns.add(session_id="s", agent_id="SHURI", utterance="a", speech="b", latency_ms=150, trace=[])
     stats = (await turns.stats())["SHURI"]
     assert stats.turns == 2 and stats.avg_latency_ms == 100.0 and stats.last_active.tzinfo is not None
+
+
+# ------------------------------------------------------------------ mfa one-time state
+# True parallel transactions on real Postgres (separate UserStore instances == separate
+# connections) prove the version compare-and-set yields a single winner, complementing the
+# SQLite proofs in test_storage.py. These do not rely on FOR UPDATE.
+
+
+async def _pg_mfa_user(pg) -> str:
+    user = await UserStore(pg).create("mfauser", await hash_password("pw correct horse battery"))
+    return user.id
+
+
+async def test_enable_mfa_has_exactly_one_winner_on_postgres(pg):
+    """Two concurrent confirmations across separate connections: only one enables MFA and
+    reveals its recovery set -- the version CAS, not a lock SQLite would ignore, is what
+    guarantees it."""
+    uid = await _pg_mfa_user(pg)
+    await UserStore(pg).set_mfa_pending(uid, "SHAREDSECRETAAAA")
+    results = await asyncio.gather(
+        UserStore(pg).enable_mfa(uid, ["setA"], expected_secret="SHAREDSECRETAAAA", last_counter=1),
+        UserStore(pg).enable_mfa(uid, ["setB"], expected_secret="SHAREDSECRETAAAA", last_counter=1),
+    )
+    assert sum(bool(r) for r in results) == 1
+    row = await UserStore(pg).by_id(uid)
+    assert row.mfa_enabled is True and row.mfa_recovery_hashes in (["setA"], ["setB"])
+
+
+async def test_recovery_consume_has_exactly_one_winner_on_postgres(pg):
+    """Two concurrent redemptions of the same recovery hash across separate connections:
+    exactly one succeeds and exactly one hash is removed (single-use under real concurrency)."""
+    uid = await _pg_mfa_user(pg)
+    await UserStore(pg).set_mfa_pending(uid, "SHAREDSECRETBBBB")
+    await UserStore(pg).enable_mfa(uid, ["h1", "h2", "h3"], expected_secret="SHAREDSECRETBBBB",
+                                   last_counter=1)
+    results = await asyncio.gather(
+        UserStore(pg).consume_recovery_hash(uid, "h2"),
+        UserStore(pg).consume_recovery_hash(uid, "h2"),
+    )
+    assert sum(bool(r) for r in results) == 1
+    remaining = (await UserStore(pg).by_id(uid)).mfa_recovery_hashes
+    assert sorted(remaining) == ["h1", "h3"]
+
+
+async def test_stale_enrollment_cannot_disable_enabled_mfa_on_postgres(pg):
+    """A late pending write across a separate connection must be refused once MFA is on, so
+    it cannot clear a just-activated factor."""
+    uid = await _pg_mfa_user(pg)
+    await UserStore(pg).set_mfa_pending(uid, "SECRETAAAAAAAAAA")
+    await UserStore(pg).enable_mfa(uid, ["r1"], expected_secret="SECRETAAAAAAAAAA", last_counter=1)
+    assert await UserStore(pg).set_mfa_pending(uid, "LATEAAAAAAAAAAAA") is False
+    row = await UserStore(pg).by_id(uid)
+    assert row.mfa_enabled is True and row.mfa_secret == "SECRETAAAAAAAAAA"
+    assert row.mfa_recovery_hashes == ["r1"]

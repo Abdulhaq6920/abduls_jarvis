@@ -373,9 +373,10 @@ def test_enrollment_code_cannot_be_replayed_at_first_login(client, admin):
 
 def test_recovery_code_consumed_exactly_once(client, admin):
     """A recovery hash is removed exactly once: a repeat consume of the same value fails and
-    the stored list shrinks by exactly one. (In-process the app serializes requests through
-    the event loop and SQLite's single writer; on a concurrent backend the FOR UPDATE row
-    lock serializes the read-modify-write.)"""
+    the stored list shrinks by exactly one. The orchestrated interleaving below
+    (``test_recovery_consume_has_exactly_one_winner_under_interleave``) proves the stronger
+    property -- single-winner when two transactions read the SAME version before either
+    writes -- which this serial check cannot establish on its own."""
     from jarvis_backend.auth.passwords import verify_hash
     _, codes = enroll_mfa(client, admin)
     code = codes[0]
@@ -425,6 +426,101 @@ def test_enable_is_bound_to_the_verified_secret(client, admin):
     enabled_on_a, still_after_a, enabled_on_b = _run(interleave())
     assert enabled_on_a is False and still_after_a is False
     assert enabled_on_b is True
+
+
+def test_stale_enrollment_cannot_turn_off_a_just_enabled_factor(client, admin):
+    """Orchestrated race for finding #1: request A starts enrollment while the account is
+    DISABLED, then request B confirms and ENABLES MFA before A's pending write lands.
+
+        A: read MFA-disabled account; verify current password
+        B: confirm pending secret; commit mfa_enabled=True
+        A: set_mfa_pending() -- MUST be refused, not clear the just-activated factor
+
+    ``set_mfa_pending`` is a conditional UPDATE guarded on ``mfa_enabled IS FALSE``, so A's
+    late write affects 0 rows (returns False) and the service turns it into a 409. MFA
+    stays enabled. This exercises the exact interleaving the prior test missed."""
+    container = client.app.state.container
+    secret, _ = enroll_mfa(client, admin)  # account is now ENABLED (request B already done)
+
+    async def stale_write():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        # Request A, which began while the account was disabled, finally tries to store its
+        # pending secret. The conditional write must be refused because B enabled MFA.
+        return await container.auth.users.set_mfa_pending(user.id, "CCCCCCCCCCCCCCCC")
+
+    accepted = _run(stale_write())
+    assert accepted is False  # fail closed: the stale pending write is rejected
+    status = client.get("/api/auth/mfa/status", headers=admin).json()
+    assert status["enabled"] is True  # the activated factor is untouched
+    # The secret A tried to store never took effect: the still-live factor is the real one.
+    secret_now = _run(_read_secret(container))
+    assert secret_now == secret and secret_now != "CCCCCCCCCCCCCCCC"
+
+
+async def _read_secret(container):
+    user = await container.auth.users.by_username(ADMIN_USER)
+    return (await container.auth.users.by_id(user.id)).mfa_secret
+
+
+def test_enable_confirmation_has_exactly_one_winner_under_interleave(client, admin):
+    """Finding #2 (enable): two confirmations that read the SAME pending state before
+    either commits must NOT both reveal a recovery set. ``enable_mfa`` is a version
+    compare-and-set, so exactly one UPDATE affects a row -- on SQLite (no FOR UPDATE) too.
+    Run concurrently with ``asyncio.gather`` so both SELECT the same version first."""
+    import asyncio
+    container = client.app.state.container
+
+    async def race():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        await container.auth.users.set_mfa_pending(user.id, "ZZZZZZZZZZZZZZZZ")
+        # Two concurrent confirmations of the SAME pending secret, each with its OWN
+        # (distinct) recovery set. Only one may win and reveal its codes.
+        results = await asyncio.gather(
+            container.auth.users.enable_mfa(user.id, ["setA"],
+                                            expected_secret="ZZZZZZZZZZZZZZZZ", last_counter=1),
+            container.auth.users.enable_mfa(user.id, ["setB"],
+                                            expected_secret="ZZZZZZZZZZZZZZZZ", last_counter=1),
+        )
+        stored = (await container.auth.users.by_id(user.id)).mfa_recovery_hashes
+        return results, stored
+
+    results, stored = _run(race())
+    assert sum(bool(r) for r in results) == 1  # exactly one confirmation enabled MFA
+    assert stored in (["setA"], ["setB"])  # the single winner's set, never a mix/overwrite
+
+
+def test_recovery_consume_has_exactly_one_winner_under_interleave(client, admin):
+    """Finding #2 (recovery): two redemptions of the SAME code that read the SAME version
+    before either writes must yield exactly ONE success. The version compare-and-set gives
+    single-winner without FOR UPDATE, so it holds on SQLite. Run concurrently so both read
+    the same recovery list first."""
+    import asyncio
+
+    from jarvis_backend.auth.passwords import verify_hash
+    _, codes = enroll_mfa(client, admin)
+    code = codes[0]
+    container = client.app.state.container
+
+    async def race():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        hashes = (await container.auth.users.by_id(user.id)).mfa_recovery_hashes
+        before = len(hashes)
+        target = None
+        for h in hashes:
+            if await verify_hash(h, code):
+                target = h
+                break
+        assert target is not None
+        results = await asyncio.gather(
+            container.auth.users.consume_recovery_hash(user.id, target),
+            container.auth.users.consume_recovery_hash(user.id, target),
+        )
+        after = len((await container.auth.users.by_id(user.id)).mfa_recovery_hashes)
+        return results, before, after
+
+    results, before, after = _run(race())
+    assert sum(bool(r) for r in results) == 1  # single-use even under concurrency
+    assert after == before - 1  # exactly one hash removed
 
 
 def test_malformed_bearer_token_is_401_not_500(client):

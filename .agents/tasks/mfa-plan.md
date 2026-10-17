@@ -261,5 +261,51 @@ Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
   rejected). Settings load with documented defaults (issuer JARVIS, window 300, require_mfa
   False). Dashboard grep: no `innerHTML` / inline `<script>` / CDN introduced.
 
+## Verification note (fourth iteration — concurrency findings fixed)
+
+Both findings from the latest `.agents/tasks/mfa-review.json` / `mfa-review.md` are fixed.
+The root cause of both was the same: the one-time MFA state relied on in-process
+serialization and `SELECT ... FOR UPDATE`, which SQLite (a supported zero-config backend)
+silently ignores, and `set_mfa_pending` wrote unconditionally by user id.
+
+Fix — a single, backend-independent compare-and-set keyed on a new monotonic
+`users.mfa_state_version` column. Every MFA state transition reads the version, then issues
+a conditional `UPDATE ... WHERE id=? AND mfa_state_version=?` that bumps it; the checked
+`rowcount == 1` is the single-winner guarantee on SQLite exactly as on PostgreSQL. No code
+path uses `with_for_update()` anymore.
+
+1. **Stale enrollment clears an activated factor (confirmed)** — `UserStore.set_mfa_pending`
+   is now a conditional UPDATE guarded on `mfa_enabled IS FALSE` and returns a bool;
+   `AuthService.start_mfa_enrollment` turns a False into a 409 and fails closed. A request
+   that began while the account was disabled can no longer commit `mfa_enabled=False` after
+   a concurrent confirmation enabled it. Tests:
+   `test_stale_enrollment_cannot_turn_off_a_just_enabled_factor` (orchestrated interleaving,
+   HTTP), `test_set_mfa_pending_refuses_once_enabled` (store, SQLite),
+   `test_stale_enrollment_cannot_disable_enabled_mfa_on_postgres` (real Postgres).
+2. **SQLite one-time state is not atomic (confirmed)** — `enable_mfa` and
+   `consume_recovery_hash` dropped `with_for_update()` for the version compare-and-set:
+   both read the version, mutate in Python (secret binding / remove-by-value), then UPDATE
+   only if the version is unchanged, bumping it. Two confirmations cannot each reveal a
+   recovery set; one recovery hash is spent exactly once. Tests prove single-winner under
+   genuine concurrency (`asyncio.gather`) on BOTH backends:
+   `test_enable_confirmation_has_exactly_one_winner_under_interleave`,
+   `test_recovery_consume_has_exactly_one_winner_under_interleave` (HTTP),
+   `test_enable_mfa_single_winner_on_shared_version`,
+   `test_recovery_consume_single_winner_on_shared_version`,
+   `test_enable_mfa_loses_to_a_concurrent_re_pending` (store, SQLite),
+   `test_enable_mfa_has_exactly_one_winner_on_postgres`,
+   `test_recovery_consume_has_exactly_one_winner_on_postgres` (real Postgres).
+
+Schema: `users.mfa_state_version INTEGER NOT NULL DEFAULT 0` added to `storage/models.py`;
+picked up by `create_all` for fresh DBs; the manual `ALTER TABLE` note in `docs/OPERATIONS.md`
+now includes it (no Alembic until Phase 5).
+
+Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
+- `pytest tests/unit tests/integration -q -rs` -> **308 passed, 8 skipped** (8 = expected
+  postgres skips, now including the 3 new Postgres MFA concurrency tests, which run when
+  `pgserver`/`JARVIS_TEST_POSTGRES_URL` is available). 1 pre-existing unrelated deprecation
+  warning. No regression to the prior green baseline.
+- `pytest tests/unit/test_deployment_files.py -q` -> 17 passed (docs/.env still consistent).
+
 ## Reviewer gate contract (unchanged by this plan)
 The implement-and-review loop's reviewer writes `c:\Users\Lenovo\Desktop\JARVIS\abduls_jarvis\.agents\tasks\mfa-review.json` with `verdict` = `APPROVED` as the loop's last child when all items above are satisfied and the full suite is green.

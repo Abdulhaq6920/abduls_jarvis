@@ -182,7 +182,14 @@ class AuthService:
                                 "MFA is already enabled. Disable it first (requires your password "
                                 "and a current code) to enroll a new authenticator.")
         secret = totp.generate_secret()
-        await self.users.set_mfa_pending(user.id, secret)
+        # Conditional (fail-closed) write: refused if MFA was enabled between the check
+        # above and here (a concurrent confirmation). This closes the stale-enrollment
+        # race where a request that began while the account was disabled would otherwise
+        # commit mfa_enabled=False and clear a factor another transaction just activated.
+        if not await self.users.set_mfa_pending(user.id, secret):
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "MFA is already enabled. Disable it first (requires your password "
+                                "and a current code) to enroll a new authenticator.")
         uri = totp.otpauth_uri(secret, account=user.username, issuer=self._s.mfa_issuer)
         await self._audit.record("mfa_enrollment_started", user=user.username)
         return secret, uri
@@ -202,10 +209,11 @@ class AuthService:
         # Persist the matched confirmation counter as last_counter: the SAME code must not
         # be replayable at the first login or a step-up within its 30s step. Replay
         # protection therefore begins at enablement, not at the first authentication.
-        # enable_mfa is bound (FOR UPDATE) to the still-pending state AND the exact secret
-        # that was just verified, so a concurrent re-enrollment that swapped the secret
+        # enable_mfa is a version compare-and-set bound to the still-pending state AND the
+        # exact secret just verified, so a concurrent re-enrollment that swapped the secret
         # cannot be enabled on this proof, and two concurrent confirmations cannot each
-        # reveal a distinct recovery set: the loser returns False and fails closed.
+        # reveal a distinct recovery set: the loser's stale-version UPDATE touches no row,
+        # returns False, and fails closed. Portable to SQLite (no SELECT ... FOR UPDATE).
         if not await self.users.enable_mfa(user.id, hashes, expected_secret=user.mfa_secret,
                                            last_counter=matched):
             raise HTTPException(status.HTTP_409_CONFLICT, "No pending MFA enrollment to confirm.")

@@ -38,6 +38,12 @@ class UserRow(Base):
     mfa_last_counter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # replay guard
     # argon2 hashes of one-time recovery codes (never plaintext); each used once.
     mfa_recovery_hashes: Mapped[Optional[list]] = mapped_column(EncryptedJSON, nullable=True)
+    # Monotonic generation for the MFA factor state. Every transition (pending/enable/
+    # disable/recovery-consume) bumps it, and each transition is a conditional UPDATE keyed
+    # on the version it read. This gives a backend-independent compare-and-set -- the
+    # checked ``rowcount`` is the single-winner guarantee on SQLite (which ignores
+    # ``SELECT ... FOR UPDATE``) exactly as it is on PostgreSQL.
+    mfa_state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class SessionRow(Base):
