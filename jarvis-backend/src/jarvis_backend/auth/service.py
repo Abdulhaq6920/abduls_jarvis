@@ -229,10 +229,33 @@ class AuthService:
         if not await verify_password(user.password_hash, current_password):
             await self._audit.record("mfa_disable_failed", user=user.username, reason="password")
             raise _unauthorized("Current password is incorrect.")
+        # The factor GENERATION this request authenticates against, pinned BEFORE the second
+        # factor is checked. The clear below is bound to it: if a concurrent disable+
+        # re-enroll rotated the factor (each step bumps mfa_state_version), the version has
+        # moved on and the conditional clear touches 0 rows -- we fail closed instead of
+        # erasing the replacement (stale-disable race). Binding on the encrypted secret is
+        # impossible (non-deterministic Fernet ciphertext never matches in SQL), so the
+        # plain-integer state version is the portable CAS key.
+        authenticated_version = user.mfa_state_version
         if not await self._check_second_factor(user, code):
             await self._audit.record("mfa_disable_failed", user=user.username, reason="second_factor")
             raise _unauthorized("That code is not valid.")
-        await self.users.disable_mfa(user.id)
+        # Re-read to find the generation as it stands now. The ONLY version change THIS
+        # request can have caused is its own recovery-code consume (+1); a TOTP match leaves
+        # it unchanged. So an advance of 0 or 1 from the authenticated version is this
+        # request's own effect and is the generation it proved. Anything else means a
+        # concurrent disable+re-enroll (three bumps) rotated the factor underneath us ->
+        # fail closed rather than clear the replacement.
+        current = await self.users.by_id(user.id)
+        if (current is None or not current.mfa_enabled
+                or current.mfa_state_version not in (authenticated_version, authenticated_version + 1)):
+            await self._audit.record("mfa_disable_failed", user=user.username, reason="stale_factor")
+            raise _unauthorized("That code is not valid.")
+        if not await self.users.disable_mfa(user.id, expected_version=current.mfa_state_version):
+            # Lost a race between the re-read and the clear: a rotation landed in that
+            # window. The CAS touched no row; refuse rather than wipe the replacement.
+            await self._audit.record("mfa_disable_failed", user=user.username, reason="stale_factor")
+            raise _unauthorized("That code is not valid.")
         await self._audit.record("mfa_disabled", user=user.username)
 
     async def complete_mfa_login(self, mfa_token: str, code: str, ip: str,

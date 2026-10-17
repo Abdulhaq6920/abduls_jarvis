@@ -307,5 +307,52 @@ Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
   warning. No regression to the prior green baseline.
 - `pytest tests/unit/test_deployment_files.py -q` -> 17 passed (docs/.env still consistent).
 
+## Verification note (fifth iteration — stale-disable race + CLI enrollment test)
+
+Both findings from the latest `.agents/tasks/mfa-review.json` / `mfa-review.md` are fixed.
+
+1. **Stale MFA disablement (confirmed)** — `AuthService.disable_mfa` proved a factor against
+   generation G but `UserStore.disable_mfa(user.id)` then cleared whichever generation was
+   current, so a delayed request could erase a replacement enrolled in between. The clear is
+   now BOUND to the generation that was authenticated, using the `mfa_state_version`
+   compare-and-set that already governs every other MFA transition. (Binding on the secret
+   is impossible: `mfa_secret` is `EncryptedText` and Fernet ciphertext is non-deterministic,
+   so a `WHERE mfa_secret = ?` can never match — the plain-integer version is the portable
+   CAS key.) `UserStore.disable_mfa(user_id, *, expected_version)` issues
+   `UPDATE ... WHERE id=? AND mfa_enabled AND mfa_state_version=?` and returns the checked
+   `rowcount == 1`. The service pins the version read at load, re-reads after the second-
+   factor check (whose only self-caused change is a recovery-code consume, +1), accepts an
+   advance of 0 or 1 as its own effect, and fails closed (401) on anything else — a
+   concurrent disable+re-enroll is three bumps and never collides. Tests:
+   `test_disable_mfa_is_bound_to_the_authenticated_generation` (store, SQLite),
+   `test_stale_disable_cannot_clear_a_rotated_factor_on_postgres` (real Postgres),
+   `test_stale_disable_through_the_service_keeps_a_rotated_factor` (end-to-end: a rotation
+   is interleaved DURING the second-factor check; the disable returns 401 and the rotated-in
+   replacement stays enabled). The existing
+   `test_disable_requires_password_and_second_factor` / `test_disable_with_password_only_is_refused_401`
+   still pass, so the normal disable path is unchanged.
+
+2. **Missing CLI enrollment test (confirmed)** — added coverage for the secret-bearing
+   `enroll-mfa` command in `tests/integration/test_cli.py`:
+   `test_enroll_mfa_wrong_password_discloses_no_setup_material` (a wrong current password is
+   rejected before any secret/URI/recovery material is printed, MFA stays disabled) and
+   `test_enroll_mfa_enrolls_with_a_valid_code_and_persists_only_hashes` (correct password +
+   a valid TOTP enables MFA, prints the otpauth URI + secret and ten recovery codes exactly
+   once, and the stored `mfa_recovery_hashes` are argon2 hashes only — each printed code
+   verifies against a stored hash, no plaintext code is persisted). The TOTP for the random
+   pending secret is derived by reading + decrypting the stored secret via stdlib `sqlite3`
+   (the code prompt fires inside the CLI's own event loop, so a nested `asyncio.run` is not
+   possible).
+
+Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
+- `pytest tests/unit tests/integration -q -rs` -> **312 passed, 9 skipped** (9 = expected
+  postgres skips, now including the new `test_stale_disable_cannot_clear_a_rotated_factor_on_postgres`,
+  which runs when `pgserver`/`JARVIS_TEST_POSTGRES_URL` is available). 1 pre-existing
+  unrelated `HTTP_422_UNPROCESSABLE_ENTITY` deprecation warning. No regression.
+- App factory builds with no MFA configured (`issuer=JARVIS`, `step_up_window=300`,
+  `require_mfa=False`).
+- ruff is absent from the offline `.venv` (as documented); edits match the surrounding
+  style and the repo ignores `E501`.
+
 ## Reviewer gate contract (unchanged by this plan)
 The implement-and-review loop's reviewer writes `c:\Users\Lenovo\Desktop\JARVIS\abduls_jarvis\.agents\tasks\mfa-review.json` with `verdict` = `APPROVED` as the loop's last child when all items above are satisfied and the full suite is green.

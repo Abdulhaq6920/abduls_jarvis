@@ -214,3 +214,31 @@ async def test_enable_mfa_loses_to_a_concurrent_re_pending(db):
     assert await users.enable_mfa(uid, ["r"], expected_secret="FIRSTSECRETAAAAA",
                                   last_counter=1) is False
     assert (await users.by_id(uid)).mfa_enabled is False
+
+
+async def test_disable_mfa_is_bound_to_the_authenticated_generation(db):
+    """Finding #1: disablement proves generation G, but a concurrent disable+re-enroll
+    rotates to a replacement G+n before the clear lands. The clear is bound to the state
+    VERSION that was proved (the encrypted secret can't be matched in SQL), so the stale
+    request touches no row and the replacement survives.
+
+        A: authenticate generation G -> reads mfa_state_version == v_g
+        B: disable G, re-enroll + enable a replacement (bumps the version past v_g)
+        A: disable_mfa(expected_version=v_g) -- MUST be refused, replacement stays enabled
+    """
+    users = UserStore(db)
+    uid = await _mfa_user(db)
+    await users.set_mfa_pending(uid, "SECRETGGGGGGGGGG")
+    assert await users.enable_mfa(uid, ["g1"], expected_secret="SECRETGGGGGGGGGG",
+                                  last_counter=1) is True
+    v_g = (await users.by_id(uid)).mfa_state_version  # generation A authenticated against
+    # Request B rotates the factor out from under A (each step bumps the version).
+    assert await users.disable_mfa(uid, expected_version=v_g) is True
+    await users.set_mfa_pending(uid, "SECRETNNNNNNNNNN")
+    assert await users.enable_mfa(uid, ["n1"], expected_secret="SECRETNNNNNNNNNN",
+                                  last_counter=1) is True
+    # Request A, which only proved generation G, finally tries to clear its stale version.
+    assert await users.disable_mfa(uid, expected_version=v_g) is False
+    row = await users.by_id(uid)
+    assert row.mfa_enabled is True and row.mfa_secret == "SECRETNNNNNNNNNN"
+    assert row.mfa_recovery_hashes == ["n1"]  # the replacement factor is intact

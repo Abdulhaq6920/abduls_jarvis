@@ -523,6 +523,51 @@ def test_recovery_consume_has_exactly_one_winner_under_interleave(client, admin)
     assert after == before - 1  # exactly one hash removed
 
 
+def test_stale_disable_through_the_service_keeps_a_rotated_factor(client, admin):
+    """Finding #1 end-to-end: ``AuthService.disable_mfa`` binds the clear to the factor it
+    authenticated. We force the exact race by rotating the factor DURING the second-factor
+    check (the point between loading the user and clearing it): the disable must fail closed
+    (401) and the freshly rotated factor must remain enabled."""
+    container = client.app.state.container
+    auth = container.auth
+    secret, codes = enroll_mfa(client, admin)
+
+    async def race():
+        from jarvis_backend.auth.service import Principal
+        user = await auth.users.by_username(ADMIN_USER)
+        principal = Principal(subject=user.id, role="admin", sid="x", kind="user")
+        original_check = auth._check_second_factor
+
+        async def check_then_rotate(u, code):
+            ok = await original_check(u, code)
+            if ok:
+                # Request B lands here (between A's factor check and A's clear): disable the
+                # proved generation and enroll+enable a replacement, all before A's clear.
+                fresh = await auth.users.by_id(u.id)
+                await auth.users.disable_mfa(u.id, expected_version=fresh.mfa_state_version)
+                await auth.users.set_mfa_pending(u.id, "REPLACEMENTSECRET")
+                await auth.users.enable_mfa(u.id, ["replacement"],
+                                            expected_secret="REPLACEMENTSECRET", last_counter=1)
+            return ok
+
+        auth._check_second_factor = check_then_rotate
+        try:
+            raised = None
+            try:
+                await auth.disable_mfa(principal, ADMIN_PASSWORD, codes[1])
+            except Exception as exc:  # noqa: BLE001 - we assert on the HTTP status below
+                raised = exc
+            row = await auth.users.by_id(user.id)
+            return raised, row.mfa_enabled, row.mfa_secret
+        finally:
+            auth._check_second_factor = original_check
+
+    raised, still_enabled, secret_now = _run(race())
+    assert raised is not None and getattr(raised, "status_code", None) == 401
+    assert still_enabled is True  # the rotated-in replacement survived the stale clear
+    assert secret_now == "REPLACEMENTSECRET"
+
+
 def test_malformed_bearer_token_is_401_not_500(client):
     """A malformed JWT on a protected route normalizes to 401 (not a decoder 500)."""
     assert client.get("/api/auth/me", headers=bearer("not-a-valid-jwt")).status_code == 401

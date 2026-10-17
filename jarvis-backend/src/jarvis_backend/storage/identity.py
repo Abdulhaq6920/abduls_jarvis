@@ -111,12 +111,27 @@ class UserStore:
                 mfa_state_version=UserRow.mfa_state_version + 1))
             return res.rowcount == 1
 
-    async def disable_mfa(self, user_id: str) -> None:
+    async def disable_mfa(self, user_id: str, *, expected_version: int) -> bool:
+        """Clear the factor, BOUND to the generation (``mfa_state_version``) authenticated.
+
+        Disablement verifies a second factor against one generation G, but another request
+        can disable G and enroll+enable a replacement G+n in between. An unconditional
+        ``WHERE id=?`` clear would then erase the replacement, leaving the account
+        password-only. This UPDATE only fires while the state version is STILL the one the
+        caller proved against; a rotation (disable+pending+enable) bumps the version, so a
+        stale clear touches 0 rows and returns False -- the caller fails closed and the
+        replacement factor survives. The version is a plain integer (NOT the encrypted
+        secret, whose Fernet ciphertext is non-deterministic and cannot be matched in SQL),
+        and the checked ``rowcount`` is the single-winner guarantee on SQLite exactly as on
+        PostgreSQL (no ``SELECT ... FOR UPDATE``)."""
         async with self._db.session() as s:
-            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(True),
+                UserRow.mfa_state_version == expected_version).values(
                 mfa_secret=None, mfa_enabled=False, mfa_last_counter=None,
                 mfa_recovery_hashes=None,
                 mfa_state_version=UserRow.mfa_state_version + 1))
+            return res.rowcount == 1
 
     async def advance_mfa_counter(self, user_id: str, counter: int,
                                   previous: Optional[int]) -> bool:

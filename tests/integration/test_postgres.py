@@ -141,3 +141,27 @@ async def test_stale_enrollment_cannot_disable_enabled_mfa_on_postgres(pg):
     row = await UserStore(pg).by_id(uid)
     assert row.mfa_enabled is True and row.mfa_secret == "SECRETAAAAAAAAAA"
     assert row.mfa_recovery_hashes == ["r1"]
+
+
+async def test_stale_disable_cannot_clear_a_rotated_factor_on_postgres(pg):
+    """Finding #1 on real Postgres: a disable that authenticated generation G must not clear
+    a replacement G+n enrolled in between. Clearing is bound to the proved state VERSION, so
+    the stale request affects 0 rows and the replacement survives.
+
+        A: authenticate generation G -> reads mfa_state_version == v_g
+        B: disable G, enroll+enable the replacement across a SEPARATE connection
+        A: disable_mfa(expected_version=v_g) -- refused; replacement stays enabled
+    """
+    uid = await _pg_mfa_user(pg)
+    await UserStore(pg).set_mfa_pending(uid, "SECRETGGGGGGGGGG")
+    await UserStore(pg).enable_mfa(uid, ["g1"], expected_secret="SECRETGGGGGGGGGG", last_counter=1)
+    v_g = (await UserStore(pg).by_id(uid)).mfa_state_version
+    # Request B (separate connection) rotates the factor to a replacement generation.
+    assert await UserStore(pg).disable_mfa(uid, expected_version=v_g) is True
+    await UserStore(pg).set_mfa_pending(uid, "SECRETNNNNNNNNNN")
+    await UserStore(pg).enable_mfa(uid, ["n1"], expected_secret="SECRETNNNNNNNNNN", last_counter=1)
+    # Request A's delayed clear, bound to the retired version v_g, must lose.
+    assert await UserStore(pg).disable_mfa(uid, expected_version=v_g) is False
+    row = await UserStore(pg).by_id(uid)
+    assert row.mfa_enabled is True and row.mfa_secret == "SECRETNNNNNNNNNN"
+    assert row.mfa_recovery_hashes == ["n1"]
