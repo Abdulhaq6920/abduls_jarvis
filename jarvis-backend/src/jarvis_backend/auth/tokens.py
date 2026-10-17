@@ -84,11 +84,14 @@ class TokenCodec:
                           headers={"kid": _kid(self._secret)})
 
     def _decode(self, token: str) -> dict:
-        header = jwt.get_unverified_header(token)
-        secret = self._keys.get(header.get("kid", ""))
-        if secret is None:
-            raise TokenError("unknown signing key")
+        # Header parsing and key selection stay INSIDE the PyJWTError guard: a malformed
+        # token makes jwt.get_unverified_header raise DecodeError (a PyJWTError), and that
+        # must normalize to TokenError -> uniform 401, never escape as a 500.
         try:
+            header = jwt.get_unverified_header(token)
+            secret = self._keys.get(header.get("kid", ""))
+            if secret is None:
+                raise TokenError("unknown signing key")
             return jwt.decode(
                 token, secret, algorithms=[ALGORITHM], issuer=self._issuer,
                 audience=self._audience, leeway=_LEEWAY_SECONDS,

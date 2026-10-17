@@ -106,15 +106,21 @@ Authenticator, Authy, or Microsoft Authenticator.
 
 **Enroll:**
 
-- Dashboard → System → Two-factor authentication → **Enable MFA**: scan the shown `otpauth://`
+- Dashboard → System → Two-factor authentication → **Enable MFA**: **confirm your current
+  password** (a stolen session alone cannot provision a factor), then scan the shown `otpauth://`
   URI (or type the base32 secret in manually), enter the code to confirm, then **save the ten
-  one-time recovery codes** — they are shown only once.
-- Or from the CLI: `python -m jarvis_backend enroll-mfa --username <name>`. It prints the URI +
-  secret for manual entry, waits for a confirming code, then prints the recovery codes once.
+  one-time recovery codes** — the recovery-code panel stays up until you acknowledge saving them,
+  and they are shown only once.
+- Or from the CLI: `python -m jarvis_backend enroll-mfa --username <name>`. It asks for the
+  current password, prints the URI + secret for manual entry, waits for a confirming code, then
+  prints the recovery codes once.
 
 **Recovery codes:** ten are generated at enablement, stored only as argon2 hashes (never
 plaintext), and each works exactly once. Store them in your password manager, not on the same
 device as the authenticator. They are shown only at enrollment — re-enroll to get a fresh set.
+
+**Replay note:** the code that confirms enrollment is consumed at the same moment MFA is enabled,
+so it cannot be reused for the first login or a step-up within its 30-second window.
 
 **Login with MFA:** a password returns an `mfa_pending` challenge (not an access token); the
 dashboard then asks for a code (a recovery code also works). The code step is rate-limited like

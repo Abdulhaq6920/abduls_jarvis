@@ -27,6 +27,7 @@ from jarvis_backend.schemas_auth import (
     MeOut,
     MfaDisableIn,
     MfaEnableOut,
+    MfaEnrollIn,
     MfaEnrollOut,
     MfaLoginIn,
     MfaRequiredOut,
@@ -133,10 +134,10 @@ async def mfa_status(principal: Principal = admin_only,
 
 
 @router.post("/mfa/enroll", response_model=MfaEnrollOut)
-async def mfa_enroll(principal: Principal = admin_only,
+async def mfa_enroll(body: MfaEnrollIn, principal: Principal = admin_only,
                      c: Container = Depends(get_container)) -> MfaEnrollOut:
     await c.limiter.enforce(f"mfa:enroll:{principal.subject}", limit=10, window=300)
-    secret, uri = await c.auth.start_mfa_enrollment(principal)
+    secret, uri = await c.auth.start_mfa_enrollment(principal, body.current_password)
     return MfaEnrollOut(secret=secret, otpauth_uri=uri)
 
 

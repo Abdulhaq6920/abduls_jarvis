@@ -37,6 +37,14 @@ class MeOut(BaseModel):
 
 
 # ------------------------------------------------------------------------------ MFA
+class MfaEnrollIn(BaseModel):
+    """Starting enrollment requires the admin's current password: a stolen bearer token
+    alone must not be able to provision an attacker-controlled factor and then satisfy a
+    mandatory high-risk step-up gate."""
+
+    current_password: str = Field(min_length=1, max_length=128)
+
+
 class MfaEnrollOut(BaseModel):
     """Returned when enrollment starts: the secret and URI for manual entry / QR import.
 

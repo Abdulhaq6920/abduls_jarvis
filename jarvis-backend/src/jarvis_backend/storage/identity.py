@@ -72,21 +72,27 @@ class UserStore:
                 mfa_secret=secret, mfa_enabled=False, mfa_last_counter=None,
                 mfa_recovery_hashes=None))
 
-    async def enable_mfa(self, user_id: str, recovery_hashes: List[str],
-                         last_counter: Optional[int] = None) -> bool:
+    async def enable_mfa(self, user_id: str, recovery_hashes: List[str], *,
+                         expected_secret: str, last_counter: Optional[int] = None) -> bool:
         """Flip MFA on after a correct code confirmed the pending secret.
 
-        Conditional on the row still being in the pending state (a secret set, not yet
-        enabled): two concurrent confirmations cannot both win and each hand out a
-        distinct recovery-code set. Only the caller whose UPDATE changed a row (returns
-        True) may show its codes; the loser returns False and shows nothing."""
+        Bound to the EXACT secret that was verified: the row is read FOR UPDATE and the
+        transition only happens if it is still pending AND its secret is still
+        ``expected_secret``. This closes the confirmation race -- a concurrent
+        ``set_mfa_pending`` that replaced secret A with secret B after the caller verified
+        A can no longer be enabled on A's proof; the mismatched caller returns False and
+        shows nothing. The row lock also serialises two concurrent confirmations so only
+        one can enable + reveal a recovery set. ``last_counter`` is the matched
+        confirmation counter, persisted atomically so that code cannot be replayed."""
         async with self._db.session() as s:
-            res = await s.execute(update(UserRow).where(
-                UserRow.id == user_id, UserRow.mfa_enabled.is_(False),
-                UserRow.mfa_secret.is_not(None)).values(
-                mfa_enabled=True, mfa_recovery_hashes=list(recovery_hashes),
-                mfa_last_counter=last_counter))
-            return res.rowcount == 1
+            row = (await s.execute(select(UserRow).where(UserRow.id == user_id)
+                                   .with_for_update())).scalar_one_or_none()
+            if row is None or row.mfa_enabled or row.mfa_secret != expected_secret:
+                return False
+            row.mfa_enabled = True
+            row.mfa_recovery_hashes = list(recovery_hashes)
+            row.mfa_last_counter = last_counter
+            return True
 
     async def disable_mfa(self, user_id: str) -> None:
         async with self._db.session() as s:
@@ -104,10 +110,15 @@ class UserStore:
         The ``counter > mfa_last_counter`` guard also rejects an already-passed step even
         if ``previous`` was read as stale-null by a racing caller."""
         async with self._db.session() as s:
+            # Strictly-increasing guard: the stored counter must still be ``previous`` AND
+            # the new counter must be greater than whatever is stored. A duplicate that read
+            # the same ``previous`` after the counter already moved to ``counter`` loses,
+            # because ``counter > counter`` is false -- so a step cannot be re-advanced.
             prev_clause = (UserRow.mfa_last_counter.is_(None) if previous is None
                            else UserRow.mfa_last_counter == previous)
             res = await s.execute(update(UserRow).where(
-                UserRow.id == user_id, UserRow.mfa_enabled.is_(True), prev_clause).values(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(True), prev_clause,
+                (UserRow.mfa_last_counter.is_(None) | (UserRow.mfa_last_counter < counter))).values(
                 mfa_last_counter=counter))
             return res.rowcount == 1
 

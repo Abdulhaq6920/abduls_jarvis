@@ -99,26 +99,49 @@ export function mountSystem(root) {
 
   const mfaDisabledView = () => {
     const panel = el('div');
+    // Show the one-time recovery codes and KEEP them mounted until the user explicitly
+    // acknowledges saving them. Only then do we refresh MFA status (which replaces this
+    // panel) -- the codes are never returned again, so an immediate reload would destroy
+    // the only chance to copy them.
+    const showRecoveryCodes = (codes) => {
+      clear(panel, el('div', { class: 'secret-box' },
+        el('b', { text: 'MFA is on. Save these one-time recovery codes now; they are shown only once.' }),
+        ...codes.map((rc) => el('div', { class: 'mono', text: rc })),
+        el('div', { class: 'row', style: 'margin-top:12px' },
+          el('button', { class: 'btn primary', type: 'button', 'data-role': 'ack-recovery',
+            onClick: () => loadMfa.after() }, "I've saved these codes"))));
+    };
     const start = async () => {
-      try {
-        const { secret, otpauth_uri: uri } = await api('/api/auth/mfa/enroll', { method: 'POST' });
-        const code = el('input', { type: 'text', inputmode: 'numeric', maxLength: 14, placeholder: '123456', 'aria-label': 'Confirmation code' });
-        const confirm = async () => {
-          try {
-            const { recovery_codes: codes } = await api('/api/auth/mfa/verify', { method: 'POST', body: { code: code.value.trim() } });
-            clear(panel, el('div', { class: 'secret-box' },
-              el('b', { text: 'MFA is on. Save these one-time recovery codes now; they are shown only once.' }),
-              ...codes.map((rc) => el('div', { class: 'mono', text: rc }))));
-            toast('MFA enabled', 'ok'); await loadMfa.after();
-          } catch (e) { toast(e.message, 'error'); }
-        };
-        clear(panel,
-          el('p', { class: 'muted', text: 'Scan the URI below in your authenticator app, or type the secret in manually (SHA1, 6 digits, 30s). Then enter the code it shows to confirm.' }),
-          el('div', { class: 'secret-box' },
-            el('div', { text: 'Setup URI:' }), el('div', { class: 'mono', text: uri }),
-            el('div', { style: 'margin-top:6px', text: 'Secret (manual entry):' }), el('div', { class: 'mono', text: secret })),
-          el('div', { class: 'row', style: 'margin-top:10px' }, code, el('button', { class: 'btn primary', type: 'button', onClick: confirm }, 'Confirm & enable')));
-      } catch (e) { toast(e.message, 'error'); }
+      // Re-authenticate before any secret is disclosed: a stolen session alone must not be
+      // able to provision a new factor. The password uses type="password" so it is masked.
+      const pw = el('input', { type: 'password', autocomplete: 'current-password', maxLength: 128,
+        placeholder: 'Current password', 'aria-label': 'Current password' });
+      const begin = async () => {
+        if (!pw.value) { toast('Enter your current password.', 'error'); return; }
+        try {
+          const { secret, otpauth_uri: uri } = await api('/api/auth/mfa/enroll',
+            { method: 'POST', body: { current_password: pw.value } });
+          pw.value = '';
+          const code = el('input', { type: 'text', inputmode: 'numeric', maxLength: 14, placeholder: '123456', 'aria-label': 'Confirmation code' });
+          const confirm = async () => {
+            try {
+              const { recovery_codes: codes } = await api('/api/auth/mfa/verify', { method: 'POST', body: { code: code.value.trim() } });
+              toast('MFA enabled', 'ok'); showRecoveryCodes(codes);
+            } catch (e) { toast(e.message, 'error'); }
+          };
+          clear(panel,
+            el('p', { class: 'muted', text: 'Scan the URI below in your authenticator app, or type the secret in manually (SHA1, 6 digits, 30s). Then enter the code it shows to confirm.' }),
+            el('div', { class: 'secret-box' },
+              el('div', { text: 'Setup URI:' }), el('div', { class: 'mono', text: uri }),
+              el('div', { style: 'margin-top:6px', text: 'Secret (manual entry):' }), el('div', { class: 'mono', text: secret })),
+            el('div', { class: 'row', style: 'margin-top:10px' }, code, el('button', { class: 'btn primary', type: 'button', onClick: confirm }, 'Confirm & enable')));
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      clear(panel,
+        el('p', { class: 'muted', text: 'Confirm your current password to begin enrollment.' }),
+        el('div', { class: 'row', style: 'margin-top:8px' }, pw),
+        el('div', { class: 'row', style: 'margin-top:12px' },
+          el('button', { class: 'btn primary', type: 'button', onClick: begin }, 'Continue')));
     };
     clear(panel, el('p', { class: 'muted', text: 'Two-factor authentication is off. Add a TOTP authenticator for stronger sign-in and to approve high-risk actions.' }),
       el('button', { class: 'btn primary', type: 'button', onClick: start }, 'Enable MFA'));

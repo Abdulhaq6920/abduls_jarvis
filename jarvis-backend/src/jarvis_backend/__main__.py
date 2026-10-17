@@ -267,7 +267,14 @@ def cmd_enroll_mfa(args: argparse.Namespace) -> int:
                 print(f"User '{username}' does not exist.")
                 return 1
             principal = Principal(subject=user.id, role=user.role, sid="cli", kind="user")
-            secret, uri = await c.auth.start_mfa_enrollment(principal)
+            # Independent re-auth: the current password is required before any secret is
+            # disclosed, matching the API's stolen-session protection.
+            password = getpass.getpass("Current password: ")
+            try:
+                secret, uri = await c.auth.start_mfa_enrollment(principal, password)
+            except Exception:  # noqa: BLE001 - wrong password / already enabled: fail closed
+                print("Could not start enrollment (wrong password, or MFA already enabled).")
+                return 1
             print("\nAdd this account to your authenticator app:")
             print(f"  otpauth URI : {uri}")
             print(f"  secret      : {secret}   (manual entry; SHA1 / 6 digits / 30s)\n")

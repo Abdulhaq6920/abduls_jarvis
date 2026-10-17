@@ -221,5 +221,45 @@ Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
   deprecation warning.
 - App factory builds with no MFA configured (`step_up_window=300`, `require_mfa=False`).
 
+## Verification note (third iteration — review findings fixed)
+
+All five findings from `.agents/tasks/mfa-review.json` / `mfa-review.md` are addressed.
+
+1. **Bearer-only factor provisioning** — `start_mfa_enrollment` now requires the admin's
+   CURRENT PASSWORD before any secret is disclosed (independent re-auth). `MfaEnrollIn`
+   carries `current_password`; `POST /api/auth/mfa/enroll` passes it; the CLI `enroll-mfa`
+   prompts via `getpass`; the dashboard asks for the password before calling enroll. A
+   stolen bearer token alone can no longer provision a factor and satisfy
+   `approval_require_mfa=true`. Tests: `test_enroll_requires_current_password` (422 with no
+   body, 401 on wrong password, nothing disclosed; 200 on correct password).
+2. **Enrollment-code replay** — `confirm_mfa_enrollment` now captures the matched counter
+   from `totp.verify()` and persists it atomically as `mfa_last_counter` at enablement, so
+   the confirming code cannot authenticate a login or step-up in the same 30s step. Tests:
+   `test_enrollment_code_cannot_be_replayed_at_first_login`; post-enrollment tests use a
+   next-step code (`_next_code`) or a recovery code instead of replaying.
+3. **Pending-secret confirmation race** — `UserStore.enable_mfa` now reads the row
+   `FOR UPDATE` and only transitions when it is still pending AND its secret still equals
+   the exact `expected_secret` that was verified; a concurrent `set_mfa_pending` that
+   swapped the secret makes the stale enable fail closed. Test:
+   `test_enable_is_bound_to_the_verified_secret`.
+4. **Malformed JWT error escape** — `TokenCodec._decode` now parses the header and selects
+   the key INSIDE the `jwt.PyJWTError` guard, so a malformed token normalizes to
+   `TokenError` -> uniform 401 instead of a decoder 500. Tests:
+   `test_malformed_bearer_token_is_401_not_500`, and `test_mfa_login_failures_are_non_enumerating`
+   extended with malformed and valid-but-unknown-user challenges (all share one 401 body).
+5. **Vanishing recovery-code display** — the dashboard keeps the one-time recovery-code
+   panel mounted until the user clicks "I've saved these codes"; only then does it refresh
+   MFA status. Built with `el()`/`textContent` only (no innerHTML / inline script / CDN).
+
+Also hardened `UserStore.advance_mfa_counter` with a strictly-increasing guard
+(`mfa_last_counter < counter`) so an equal/stale counter cannot re-advance a step.
+
+Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
+- `pytest tests/unit tests/integration -q` -> **301 passed, 5 skipped** (5 = expected
+  postgres skips). 1 pre-existing unrelated deprecation warning.
+- TOTP smoke: generate->verify ok; verify with `last_counter=matched` returns None (replay
+  rejected). Settings load with documented defaults (issuer JARVIS, window 300, require_mfa
+  False). Dashboard grep: no `innerHTML` / inline `<script>` / CDN introduced.
+
 ## Reviewer gate contract (unchanged by this plan)
 The implement-and-review loop's reviewer writes `c:\Users\Lenovo\Desktop\JARVIS\abduls_jarvis\.agents\tasks\mfa-review.json` with `verdict` = `APPROVED` as the loop's last child when all items above are satisfied and the full suite is green.

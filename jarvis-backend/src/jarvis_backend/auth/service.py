@@ -158,16 +158,25 @@ class AuthService:
                 return await self.users.consume_recovery_hash(user.id, stored)
         return False
 
-    async def start_mfa_enrollment(self, principal: Principal) -> tuple[str, str]:
+    async def start_mfa_enrollment(self, principal: Principal,
+                                   current_password: str) -> tuple[str, str]:
         """Generate a fresh (unconfirmed) secret and the otpauth URI for an admin.
 
-        Enrollment is REFUSED while MFA is already enabled: a live session (possibly
+        Requires the admin's CURRENT PASSWORD before any secret is disclosed: a stolen
+        bearer token alone must not be able to provision an attacker-controlled factor
+        and then satisfy a mandatory high-risk step-up gate (independent re-auth proof).
+
+        Enrollment is also REFUSED while MFA is already enabled: a live session (possibly
         stolen) must not be able to clear an active factor and fall back to the non-MFA
         approval path. Rotating a factor requires disabling it first (password + a valid
         current code), which keeps the old factor live until the holder proves it."""
         user = await self.users.by_id(principal.subject)
         if user is None:
             raise _unauthorized()
+        if not await verify_password(user.password_hash, current_password):
+            await self._audit.record("mfa_enrollment_denied", user=user.username,
+                                     reason="password")
+            raise _unauthorized("Current password is incorrect.")
         if user.mfa_enabled:
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 "MFA is already enabled. Disable it first (requires your password "
@@ -184,18 +193,21 @@ class AuthService:
         user = await self.users.by_id(principal.subject)
         if user is None or not user.mfa_secret or user.mfa_enabled:
             raise HTTPException(status.HTTP_409_CONFLICT, "No pending MFA enrollment to confirm.")
-        if totp.verify(user.mfa_secret, code) is None:
+        matched = totp.verify(user.mfa_secret, code)
+        if matched is None:
             await self._audit.record("mfa_enroll_failed", user=user.username)
             raise _unauthorized("That code is not valid. Check the time on your device and retry.")
         codes = [secrets.token_hex(5) for _ in range(self._s.mfa_recovery_codes)]
         hashes = [await hash_password(c) for c in codes]
-        # Do not seed last_counter from the confirmation step: enrollment confirm is not a
-        # login, and seeding it would reject a code generated in the same 30s window at the
-        # first real sign-in. Replay protection begins at the first authentication.
-        # enable_mfa is conditional on the still-pending state, so two concurrent
-        # confirmations cannot each enable + hand out a distinct recovery set: only the
-        # winner's UPDATE changes a row and may reveal its codes; the loser fails closed.
-        if not await self.users.enable_mfa(user.id, hashes, last_counter=None):
+        # Persist the matched confirmation counter as last_counter: the SAME code must not
+        # be replayable at the first login or a step-up within its 30s step. Replay
+        # protection therefore begins at enablement, not at the first authentication.
+        # enable_mfa is bound (FOR UPDATE) to the still-pending state AND the exact secret
+        # that was just verified, so a concurrent re-enrollment that swapped the secret
+        # cannot be enabled on this proof, and two concurrent confirmations cannot each
+        # reveal a distinct recovery set: the loser returns False and fails closed.
+        if not await self.users.enable_mfa(user.id, hashes, expected_secret=user.mfa_secret,
+                                           last_counter=matched):
             raise HTTPException(status.HTTP_409_CONFLICT, "No pending MFA enrollment to confirm.")
         await self._audit.record("mfa_enabled", user=user.username)
         return codes

@@ -8,9 +8,20 @@ def _code(secret: str) -> str:
     return totp.totp_now(secret)
 
 
+def _next_code(secret: str) -> str:
+    """A code for the NEXT time step. The confirmation code is now consumed (its counter is
+    persisted as last_counter at enablement), so post-enrollment authentications must use a
+    code from a later step; the next counter is still inside verify()'s +/-1 window."""
+    return totp.totp_now(secret, counter=totp.current_counter() + 1)
+
+
+def _enroll_body():
+    return {"current_password": ADMIN_PASSWORD}
+
+
 def enroll_mfa(client, headers):
     """Enroll + confirm MFA for the logged-in admin. Returns (secret, recovery_codes)."""
-    enroll = client.post("/api/auth/mfa/enroll", headers=headers)
+    enroll = client.post("/api/auth/mfa/enroll", headers=headers, json=_enroll_body())
     assert enroll.status_code == 200, enroll.text
     secret = enroll.json()["secret"]
     assert enroll.json()["otpauth_uri"].startswith("otpauth://totp/JARVIS:")
@@ -21,7 +32,7 @@ def enroll_mfa(client, headers):
 
 # ------------------------------------------------------------------- enrollment
 def test_enrollment_requires_a_correct_code_to_enable(client, admin):
-    enroll = client.post("/api/auth/mfa/enroll", headers=admin)
+    enroll = client.post("/api/auth/mfa/enroll", headers=admin, json=_enroll_body())
     assert enroll.status_code == 200
     secret = enroll.json()["secret"]
     # A wrong code must NOT enable MFA.
@@ -71,7 +82,7 @@ def test_second_factor_completes_login(client, admin):
                       json={"mfa_token": challenge["mfa_token"], "code": "123456"})
     assert bad.status_code == 401
     good = client.post("/api/auth/mfa/login",
-                       json={"mfa_token": challenge["mfa_token"], "code": _code(secret)})
+                       json={"mfa_token": challenge["mfa_token"], "code": _next_code(secret)})
     assert good.status_code == 200 and good.json()["access_token"]
     cookie = good.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=strict" in cookie
@@ -91,7 +102,9 @@ def test_recovery_code_works_once(client, admin):
 
 def test_replayed_totp_in_the_same_step_is_rejected(client, admin):
     secret, _ = enroll_mfa(client, admin)
-    code = _code(secret)
+    # Use a post-confirmation step (the confirmation counter is already consumed), then
+    # replay that same code: the last-used counter guard must reject the second attempt.
+    code = _next_code(secret)
     first = client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}).json()
     assert client.post("/api/auth/mfa/login", json={"mfa_token": first["mfa_token"], "code": code}).status_code == 200
     second = client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}).json()
@@ -159,16 +172,16 @@ def test_high_risk_grant_requires_step_up_for_mfa_admin(client, admin):
     assert r.status_code == 401
     # Still pending (fail closed: the grant did not go through).
     assert client.get(f"/api/approvals/{aid}", headers=admin).json()["status"] == "PENDING"
-    # Inline code in the decision -> succeeds.
+    # Inline code in the decision -> succeeds (next-step code; confirmation code is spent).
     ok = client.post(f"/api/approvals/{aid}/decision", headers=admin,
-                     json={"granted": True, "code": _code(secret)})
+                     json={"granted": True, "code": _next_code(secret)})
     assert ok.status_code == 200 and ok.json()["status"] == "GRANTED"
 
 
 def test_step_up_endpoint_then_grant_within_window(client, admin):
     secret, _ = enroll_mfa(client, admin)
     aid = _pending_approval(client, "DANGEROUS")
-    assert client.post("/api/auth/mfa/step-up", headers=admin, json={"code": _code(secret)}).status_code == 204
+    assert client.post("/api/auth/mfa/step-up", headers=admin, json={"code": _next_code(secret)}).status_code == 204
     ok = client.post(f"/api/approvals/{aid}/decision", headers=admin, json={"granted": True})
     assert ok.status_code == 200 and ok.json()["status"] == "GRANTED"
 
@@ -296,21 +309,66 @@ def test_mfa_login_failures_are_non_enumerating(client, admin):
     access = admin["Authorization"].split(" ", 1)[1]
     bad_challenge = client.post("/api/auth/mfa/login",
                                 json={"mfa_token": access, "code": bad_code})
-    assert wrong_code.status_code == 401 and bad_challenge.status_code == 401
-    assert wrong_code.json() == bad_challenge.json()
+    # A MALFORMED token must normalize to the SAME 401 (not a 500 from the decoder).
+    malformed = client.post("/api/auth/mfa/login",
+                            json={"mfa_token": "not.a.jwt", "code": bad_code})
+    # An EXPIRED / VALID-BUT-UNKNOWN-USER challenge: mint a well-formed mfa_pending token
+    # for a user id that does not exist. It decodes cleanly but the account load fails ->
+    # the same uniform 401 body, so the cause is not distinguishable.
+    codec = client.app.state.container.codec
+    unknown = codec.issue_special(sub="no-such-user", sid="x", typ="mfa_pending",
+                                  ttl_seconds=300)
+    unknown_user = client.post("/api/auth/mfa/login",
+                               json={"mfa_token": unknown, "code": bad_code})
+    for r in (wrong_code, bad_challenge, malformed, unknown_user):
+        assert r.status_code == 401, r.text
+    bodies = {wrong_code.json()["detail"], bad_challenge.json()["detail"],
+              malformed.json()["detail"], unknown_user.json()["detail"]}
+    assert len(bodies) == 1  # one non-enumerating message for every failure cause
 
 
 def test_cannot_re_enroll_while_mfa_enabled(client, admin):
     """A live session alone cannot clear an active factor by starting a new enrollment
     (which would otherwise drop the account to the non-MFA high-risk path)."""
     enroll_mfa(client, admin)
-    r = client.post("/api/auth/mfa/enroll", headers=admin)
+    r = client.post("/api/auth/mfa/enroll", headers=admin, json=_enroll_body())
     assert r.status_code == 409
     assert client.get("/api/auth/mfa/status", headers=admin).json()["enabled"] is True
     # And the high-risk gate still bites: the account is still MFA, so a grant needs step-up.
     aid = _pending_approval(client, "DANGEROUS")
     assert client.post(f"/api/approvals/{aid}/decision", headers=admin,
                        json={"granted": True}).status_code == 401
+
+
+def test_enroll_requires_current_password(client, admin):
+    """A bearer token ALONE cannot provision a factor: a stolen access token with no
+    password must not be able to enroll MFA and then satisfy a mandatory step-up gate."""
+    # No body at all -> 422 (the password field is required by the contract).
+    assert client.post("/api/auth/mfa/enroll", headers=admin).status_code == 422
+    # Wrong password -> 401, and NOTHING is disclosed.
+    wrong = client.post("/api/auth/mfa/enroll", headers=admin,
+                        json={"current_password": "not-the-password"})
+    assert wrong.status_code == 401 and "secret" not in wrong.json()
+    assert client.get("/api/auth/mfa/status", headers=admin).json()["enabled"] is False
+    # The correct password discloses the secret.
+    ok = client.post("/api/auth/mfa/enroll", headers=admin, json=_enroll_body())
+    assert ok.status_code == 200 and ok.json()["secret"]
+
+
+def test_enrollment_code_cannot_be_replayed_at_first_login(client, admin):
+    """Finding: the confirmation TOTP must NOT remain valid for login/step-up in the same
+    30s step. After enablement, replaying the confirmation code fails closed."""
+    enroll = client.post("/api/auth/mfa/enroll", headers=admin, json=_enroll_body())
+    secret = enroll.json()["secret"]
+    confirm_code = _code(secret)
+    assert client.post("/api/auth/mfa/verify", headers=admin,
+                       json={"code": confirm_code}).status_code == 200
+    challenge = client.post("/api/auth/login",
+                            json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}).json()
+    # The exact code that enabled MFA is already consumed -> rejected at login.
+    replay = client.post("/api/auth/mfa/login",
+                         json={"mfa_token": challenge["mfa_token"], "code": confirm_code})
+    assert replay.status_code == 401
 
 
 def test_recovery_code_consumed_exactly_once(client, admin):
@@ -343,6 +401,38 @@ def test_recovery_code_consumed_exactly_once(client, admin):
     assert after == before - 1  # exactly one removed
 
 
+def test_enable_is_bound_to_the_verified_secret(client, admin):
+    """Confirmation race: a verification against pending secret A must NOT enable a
+    concurrently stored secret B. enable_mfa is bound to the exact verified secret, so an
+    interleaved re-enrollment makes the stale enable fail closed."""
+    container = client.app.state.container
+
+    async def interleave():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        await container.auth.users.set_mfa_pending(user.id, "AAAAAAAAAAAAAAAA")  # secret A
+        # ... caller verified A here ...
+        # Concurrent re-enrollment swaps in secret B before enable runs.
+        await container.auth.users.set_mfa_pending(user.id, "BBBBBBBBBBBBBBBB")  # secret B
+        # Enabling on A's proof must fail (bound to A), leaving MFA still disabled.
+        enabled_on_a = await container.auth.users.enable_mfa(
+            user.id, ["h"], expected_secret="AAAAAAAAAAAAAAAA", last_counter=1)
+        still = (await container.auth.users.by_id(user.id)).mfa_enabled
+        # Enabling on the actually-pending secret B succeeds.
+        enabled_on_b = await container.auth.users.enable_mfa(
+            user.id, ["h"], expected_secret="BBBBBBBBBBBBBBBB", last_counter=1)
+        return enabled_on_a, still, enabled_on_b
+
+    enabled_on_a, still_after_a, enabled_on_b = _run(interleave())
+    assert enabled_on_a is False and still_after_a is False
+    assert enabled_on_b is True
+
+
+def test_malformed_bearer_token_is_401_not_500(client):
+    """A malformed JWT on a protected route normalizes to 401 (not a decoder 500)."""
+    assert client.get("/api/auth/me", headers=bearer("not-a-valid-jwt")).status_code == 401
+    assert client.get("/api/auth/me", headers=bearer("a.b.c")).status_code == 401
+
+
 def test_totp_counter_advance_rejects_stale_previous(client, admin):
     """Compare-and-set: an advance whose ``previous`` no longer matches the stored counter
     loses, so a replayed step cannot re-advance after the counter already moved on."""
@@ -352,11 +442,13 @@ def test_totp_counter_advance_rejects_stale_previous(client, admin):
 
     async def race():
         user = await container.auth.users.by_username(ADMIN_USER)
-        counter = totp.current_counter()
-        start = user.mfa_last_counter
-        first = await container.auth.users.advance_mfa_counter(user.id, counter, start)
-        # A second caller that read the SAME old ``start`` now loses the compare-and-set.
-        second = await container.auth.users.advance_mfa_counter(user.id, counter, start)
+        start = user.mfa_last_counter  # the confirmation counter, already stored
+        # Both callers read the SAME ``start`` and target the SAME next counter.
+        target = (start or totp.current_counter()) + 1
+        first = await container.auth.users.advance_mfa_counter(user.id, target, start)
+        # A second caller that read the SAME old ``start`` now loses the compare-and-set
+        # (the stored counter has moved to ``target`` and ``target < target`` is false).
+        second = await container.auth.users.advance_mfa_counter(user.id, target, start)
         return first, second
 
     first, second = _run(race())
