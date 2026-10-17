@@ -67,5 +67,12 @@ scripts/ ui_smoke.py (real-browser check), make_docker_secrets.py
 
 ## Docs
 
+Start with [`docs/README.md`](docs/README.md) — it indexes everything. Highlights:
+
+* [`SKILL.md`](SKILL.md): the capability map — every agent, every tool category, how to add more.
+* [`ARCHITECTURE.md`](ARCHITECTURE.md): deep technical reference for all three packages.
+* [`docs/PRODUCTION_PLAN.md`](docs/PRODUCTION_PLAN.md): design pillars, current state, roadmap to prod.
+* [`CONTRIBUTING.md`](CONTRIBUTING.md): how to extend JARVIS without breaking its guarantees.
 * [`docs/SECURITY.md`](docs/SECURITY.md): threat model, what each defence is tested by, and the gaps.
 * [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): local, Postgres + Redis, Docker Compose, scaling, alerts.
+* [`docs/OPERATIONS.md`](docs/OPERATIONS.md): day-2 runbook — health, metrics, backups, key rotation.

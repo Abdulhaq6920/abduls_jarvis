@@ -1,0 +1,126 @@
+# JARVIS — Operations Runbook
+
+Day-2 operations: health, metrics, backups, key rotation, incident response. For first-time
+deployment see [`DEPLOYMENT.md`](DEPLOYMENT.md); for the threat model see [`SECURITY.md`](SECURITY.md).
+
+---
+
+## Health & readiness
+
+| Endpoint | Auth | Meaning |
+|---|---|---|
+| `GET /healthz` | none | Liveness — the process is up. Always cheap, no dependencies. |
+| `GET /readyz` | none | Readiness — DB reachable (503 if not). Redis down degrades but stays **ready**. Load balancers poll this. |
+| `GET /api/system/status` | admin | Rich runtime state: version, env, DB/cache ok, scheduler running, agent count, pending approvals, config findings. |
+| `GET /api/runtime` | admin | Last local-agent heartbeat; `connected` false if older than 45s. |
+| `GET /metrics` | metrics bearer token | Prometheus exposition. **Not** a user JWT — uses `JARVIS_METRICS_TOKEN`. Block at the proxy; scrape on the internal network. |
+
+Notes from the code:
+- `/readyz` returns `database` + `redis` status; `ready` is driven by the DB alone (Redis is an
+  accelerator, so an outage degrades rather than fails readiness).
+- Interactive API docs (`/api/docs`, `/api/openapi.json`) are **disabled in prod** by the app
+  factory — expected, not a bug.
+- There is deliberately **no CORS middleware**: the dashboard is same-origin only.
+
+## Metrics worth alerting on
+
+| Series | Alert when | Means |
+|---|---|---|
+| `jarvis_cache_fallback_active` | `== 1` | Redis is down; running on in-process fallback. |
+| `jarvis_event_loop_lag_seconds` | `> 0.25` | Something is blocking the event loop. |
+| `jarvis_process_rss_bytes` | trending up | Possible leak. |
+| `jarvis_db_pool_checked_out` | near pool size | DB pool exhaustion; tune `JARVIS_DB_POOL_SIZE` or add PgBouncer. |
+| `jarvis_pending_approvals` | `> 0` for long | Approvals piling up unactioned. |
+| `jarvis_rate_limited_total` | spike | Brute force or abuse. |
+| `jarvis_auth_events_total{event="login_401"}` | spike | Credential stuffing. |
+
+All metric names verified against `observability.py`. Full series: `jarvis_http_requests_total`,
+`jarvis_http_request_seconds`, `jarvis_http_in_flight`, `jarvis_assist_seconds`,
+`jarvis_auth_events_total`, `jarvis_rate_limited_total`, `jarvis_ws_connections`,
+`jarvis_event_loop_lag_seconds`, `jarvis_process_rss_bytes`, `jarvis_process_cpu_percent`,
+`jarvis_process_threads`, `jarvis_process_open_files`, `jarvis_uptime_seconds`,
+`jarvis_cache_hits`, `jarvis_cache_misses`, `jarvis_cache_errors`, `jarvis_cache_fallback_active`,
+`jarvis_cache_local_items`, `jarvis_db_pool_checked_out`, `jarvis_pending_approvals`. Labels are
+never user input, so series stay bounded.
+
+## Logs
+
+- JSON to stdout when `JARVIS_LOG_FORMAT=json`; every line carries `request_id` and `principal`.
+- Follow one action end to end by its `X-Request-ID`.
+- A 500 returns only an opaque `request_id` to the client; the detail is server-side only.
+- The log scrubber redacts JWTs, `Bearer …`, `password=`, and credentials inside DB/Redis URLs.
+
+## Audit trail
+
+- Append-only, **hash-chained**, tamper-evident. Stores **no utterance text**.
+- Verify integrity: `GET /api/audit/verify` (admin) or `python -m jarvis_backend verify-audit`.
+  A healthy chain reports `CHAIN VERIFIED`.
+- Watch for `refresh_reuse_detected` → treat as a credential leak (see Incident response).
+- For real assurance beyond tamper-*evidence*, ship logs to append-only external storage.
+
+## Backups
+
+1. **`JARVIS_DATA_KEY` is the crown jewel.** Back it up **separately from the database**. Without it,
+   encrypted conversations/memories/approvals/job output are unrecoverable.
+2. Back up the database (PostgreSQL in prod). The data is ciphertext at rest, so a stolen backup is
+   useless without the data key — which is exactly why the key must live elsewhere.
+3. Keep `JARVIS_JWT_SECRET` recoverable too — losing it signs everyone out (not catastrophic, but
+   disruptive).
+
+## Key & secret rotation
+
+**JWT signing secret** (`JARVIS_JWT_SECRET`):
+- Set the new secret; move the old one into `JARVIS_JWT_PREVIOUS_SECRETS` briefly so existing tokens
+  still verify. Remove the old one after the access-token lifetime (15 min) has passed.
+
+**Data encryption key** (`JARVIS_DATA_KEY`, comma-separated, newest first):
+- Prepend a new Fernet key; **keep the old key after it** so existing ciphertext stays readable
+  (`MultiFernet` tries keys in order). Only drop the old key once data has been re-encrypted.
+
+**Metrics token** (`JARVIS_METRICS_TOKEN`): rotate and update the Prometheus scrape config.
+
+## Scaling
+
+- **API is stateless** — scale replicas freely; sessions/limits/events live in Postgres/Redis.
+- **Exactly one `worker`** fires scheduled jobs. Set `JARVIS_RUN_SCHEDULER=false` on API replicas
+  and run a single `python -m jarvis_backend worker`. Scaling the worker fires every job N times.
+- **Postgres is the limit** — keep `JARVIS_DB_POOL_SIZE × replicas < max_connections`, or front with
+  PgBouncer.
+- **Redis is disposable** — no persistence, LRU cap; if it dies the API degrades (slower,
+  per-process limits) but keeps serving.
+
+## Device lifecycle
+
+- Register each PC as its own device (Dashboard → System → Local agents, or
+  `python -m jarvis_backend create-device`). One device per PC so you can revoke one without
+  touching the others.
+- Store the device secret in the Windows Credential Manager (`python -m jarvis_local_agent.credentials set`),
+  not in `.env`.
+- **Lost/compromised PC:** revoke the device on the dashboard. Its token dies on the next request and
+  it cannot mint a new one.
+
+## Incident response
+
+| Symptom | Action |
+|---|---|
+| `refresh_reuse_detected` in audit | A refresh token was replayed. Change your password (signs out every session); the token family is already auto-revoked. |
+| `jarvis_cache_fallback_active == 1` | Redis is down. Expect slower responses + per-process rate limits. Restore Redis; no data loss (it holds no truth). |
+| Suspected lost PC | Revoke that device immediately on the dashboard. |
+| Audit chain fails to verify | Someone with DB write access may have tampered. Preserve the DB, pull external log copies, investigate; the newest-entry deletion case is the known blind spot. |
+| Server will not start in prod | Run `python -m jarvis_backend check-config` — prod refuses to start on weak/missing secret, SQLite, missing Redis, or non-https origin. Fix the reported finding. |
+
+## Prod start-up gate (fail-closed)
+
+With `JARVIS_ENV=prod`, start-up aborts on any of:
+- weak, missing, or placeholder `JARVIS_JWT_SECRET` / `JARVIS_DATA_KEY`,
+- SQLite as the database,
+- no `JARVIS_REDIS_URL`,
+- a non-`https://` `JARVIS_PUBLIC_ORIGIN`.
+
+Run `check-config` to see exactly which shortcut is active before deploying.
+
+## TLS
+
+The stack serves plain HTTP on one port — **do not expose that to the internet.** Terminate TLS in
+front (cloud LB / Caddy / Traefik) pointing at nginx. Prod mode then sets `Secure` cookies + HSTS
+and refuses to start unless `JARVIS_PUBLIC_ORIGIN` is `https://`.
