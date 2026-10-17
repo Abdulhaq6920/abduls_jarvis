@@ -22,45 +22,88 @@ export function mountOverview(root, ctx) {
   let voices = {};
 
   // Browser speech INPUT (Web Speech API only; no third-party JS). SpeechRecognition is
-  // Chrome/Edge-only, so the mic button degrades gracefully where it is absent.
+  // Chrome/Edge-only AND needs a secure context (https, or localhost/127.0.0.1), so the mic
+  // button degrades gracefully where it is unavailable.
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let sessionLang = localStorage.getItem('jarvis.voiceLang') || document.documentElement.lang || 'en-US';
+  const secureCtx = window.isSecureContext
+    || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  // document.documentElement.lang is often a bare "en" which some engines reject; only accept
+  // a stored full BCP-47 code, else default to en-US.
+  const stored = localStorage.getItem('jarvis.voiceLang');
+  let sessionLang = (stored && stored.includes('-')) ? stored : 'en-US';
   let recognition = null;
   let listening = false;
+  let heardAnything = false;
 
   const langSelect = el('select', { class: 'btn', 'aria-label': 'Voice language',
     onChange: (e) => { sessionLang = e.target.value; localStorage.setItem('jarvis.voiceLang', sessionLang); } },
     LANGS.map(([code, label]) => el('option', { value: code, selected: code === sessionLang }, label)));
 
-  const mic = el('button', { class: 'btn', type: 'button', 'aria-label': 'Start voice input', 'aria-pressed': 'false', onClick: toggleMic }, 'Mic');
-  if (!SR) mic.disabled = true;
+  // 🎤 mic button. A `.listening` class drives the pulsing red "I'm hearing you" state in CSS.
+  const mic = el('button', { class: 'btn mic', type: 'button', title: 'Click and speak',
+    'aria-label': 'Start voice input', 'aria-pressed': 'false', onClick: toggleMic }, '🎤 Speak');
+  if (!SR || !secureCtx) {
+    mic.disabled = true;
+    mic.title = !SR ? 'Voice input needs Chrome or Edge'
+      : 'Voice input needs a secure page (https:// or localhost)';
+  }
+
+  function resetMic() {
+    listening = false;
+    mic.classList.remove('listening');
+    mic.setAttribute('aria-pressed', 'false');
+    mic.textContent = '🎤 Speak';
+  }
 
   function toggleMic() {
-    if (!SR) { toast('Voice input needs Chrome or Edge', ''); return; }
-    if (listening) { recognition.stop(); return; }
-    window.speechSynthesis.cancel(); // barge-in: stop any reply so the mic can hear
+    if (!SR) { toast('Voice input needs Chrome or Edge.', 'error'); return; }
+    if (!secureCtx) { toast('Voice input needs https:// or localhost (not an IP/LAN address).', 'error'); return; }
+    if (listening) { try { recognition.stop(); } catch { /* already stopping */ } return; }
+
+    window.speechSynthesis?.cancel(); // barge-in: stop any reply so the mic can hear
+    heardAnything = false;
     recognition = new SR();
     recognition.continuous = false;
     recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
     recognition.lang = sessionLang;
+
     recognition.onresult = (event) => {
       let transcript = '';
       for (const result of event.results) transcript += result[0].transcript;
-      input.value = transcript; // interim text live; onend fires send() with the final text
+      if (transcript.trim()) { heardAnything = true; input.value = transcript; } // interim text live
     };
     recognition.onend = () => {
-      listening = false; mic.setAttribute('aria-pressed', 'false'); mic.textContent = 'Mic';
+      resetMic();
       if (input.value.trim()) send();
+      else { toast(heardAnything ? 'Didn’t catch that — try again.' : 'No speech detected. Speak after the mic turns red.', ''); setState('READY', 'Say “Hey JARVIS”', ''); }
     };
     recognition.onerror = (event) => {
-      const msg = event.error === 'not-allowed' ? 'Microphone blocked. Allow mic access.'
-        : event.error === 'no-speech' ? 'No speech detected.' : 'Voice input error.';
-      toast(msg, ''); listening = false; mic.setAttribute('aria-pressed', 'false'); mic.textContent = 'Mic';
-      setState('READY', 'Say “Hey JARVIS”', '');
+      const msg = ({
+        'not-allowed': 'Microphone blocked. Click the 🔒/camera icon in the address bar and allow the mic, then reload.',
+        'service-not-allowed': 'Microphone blocked by the browser or OS privacy settings.',
+        'no-speech': 'No speech detected. Click Speak, wait for red, then talk.',
+        'audio-capture': 'No microphone found. Check your mic is connected.',
+        'network': 'Speech recognition network error — check your connection.',
+        'aborted': '',
+      })[event.error] ?? 'Voice input error. Try again.';
+      if (msg) toast(msg, 'error');
+      resetMic(); setState('READY', 'Say “Hey JARVIS”', '');
     };
-    listening = true; mic.setAttribute('aria-pressed', 'true'); mic.textContent = 'Stop';
+
+    try {
+      recognition.start();
+    } catch (err) {
+      // start() throws if a prior session is still winding down; reset cleanly.
+      resetMic(); setState('READY', 'Say “Hey JARVIS”', '');
+      toast('Mic is busy — click Speak again.', '');
+      return;
+    }
+    listening = true;
+    mic.classList.add('listening');
+    mic.setAttribute('aria-pressed', 'true');
+    mic.textContent = '● Listening…';
     setState('LISTENING', 'Speak now', 'listening');
-    recognition.start();
   }
 
   const setState = (name, sub, mode) => {
