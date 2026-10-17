@@ -161,6 +161,12 @@ td { padding: 7px 8px; border-top: 1px solid #16202d; vertical-align: top; }
 .bars i:nth-child(5) { animation-delay: .15s; } .bars i:nth-child(6) { animation-delay: .25s; } .bars i:nth-child(7) { animation-delay: .05s; }
 @keyframes eq { 0%, 100% { height: 6px; } 50% { height: 30px; } }
 
+/* Persistent microphone note: a blocked mic needs instructions that stay on screen. */
+.mic-note { margin-top: 10px; padding: 9px 12px; border-radius: 10px; font-size: 13px;
+  border: 1px solid var(--line2); background: #0a111b; color: var(--dim); }
+.mic-note.warn { border-color: #ffb02070; background: #ffb0200c; color: #ffd79a; }
+.mic-note.error { border-color: #ff5c6c70; background: #ff5c6c0c; color: #ffc2c8; }
+
 /* mic button: unmistakable pulsing-red "I'm hearing you" state so it's obvious it's live */
 .btn.mic { white-space: nowrap; }
 .btn.mic.listening { background: #ff5c6c22; border-color: var(--danger); color: #ffd9dd;

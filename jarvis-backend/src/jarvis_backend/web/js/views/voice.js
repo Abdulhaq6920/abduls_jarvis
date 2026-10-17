@@ -48,6 +48,19 @@ export function mountOverview(root, ctx) {
       : 'Voice input needs a secure page (https:// or localhost)';
   }
 
+  // A PERSISTENT note under the controls. A transient toast is easy to miss, and a blocked
+  // microphone needs instructions that stay on screen until the user fixes it.
+  const micNote = el('div', { class: 'mic-note hidden', role: 'status' });
+
+  function showMicNote(message, kind = 'warn') {
+    micNote.textContent = message;
+    micNote.className = `mic-note ${kind}`;
+  }
+  function clearMicNote() {
+    micNote.textContent = '';
+    micNote.className = 'mic-note hidden';
+  }
+
   function resetMic() {
     listening = false;
     mic.classList.remove('listening');
@@ -55,10 +68,44 @@ export function mountOverview(root, ctx) {
     mic.textContent = '🎤 Speak';
   }
 
-  function toggleMic() {
-    if (!SR) { toast('Voice input needs Chrome or Edge.', 'error'); return; }
-    if (!secureCtx) { toast('Voice input needs https:// or localhost (not an IP/LAN address).', 'error'); return; }
+  // SpeechRecognition does NOT reliably surface the browser's microphone prompt, which is
+  // why "nothing happens / no popup" is the usual symptom. Requesting the audio stream
+  // directly makes Chrome/Edge show its standard permission dialog, and gives us an exact
+  // reason when access is refused. The stream is closed immediately: we only needed consent.
+  async function ensureMicPermission() {
+    if (!navigator.mediaDevices?.getUserMedia) return true; // can't pre-check; let SR try
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      clearMicNote();
+      return true;
+    } catch (err) {
+      const name = err?.name || '';
+      showMicNote(
+        name === 'NotAllowedError' || name === 'SecurityError'
+          ? 'Microphone blocked. Click the camera/lock icon at the left of the address bar, set Microphone to Allow, then reload this page.'
+          : name === 'NotFoundError' || name === 'DevicesNotFoundError'
+            ? 'No microphone detected. Connect a mic (or check Windows Settings → Privacy → Microphone) and reload.'
+            : `Could not open the microphone (${name || 'unknown error'}). Check Windows Settings → Privacy → Microphone.`,
+        'error',
+      );
+      return false;
+    }
+  }
+
+  async function toggleMic() {
+    if (!SR) { showMicNote('Voice input needs Chrome or Edge. Firefox/Safari do not support it.', 'error'); return; }
+    if (!secureCtx) { showMicNote('Voice input needs https:// or localhost — open http://localhost:8077 instead of an IP address.', 'error'); return; }
     if (listening) { try { recognition.stop(); } catch { /* already stopping */ } return; }
+
+    // Ask for consent BEFORE starting recognition so the prompt is actually shown.
+    mic.disabled = true;
+    try {
+      const granted = await ensureMicPermission();
+      if (!granted) return;
+    } finally {
+      mic.disabled = false;
+    }
 
     window.speechSynthesis?.cancel(); // barge-in: stop any reply so the mic can hear
     heardAnything = false;
@@ -87,7 +134,12 @@ export function mountOverview(root, ctx) {
         'network': 'Speech recognition network error — check your connection.',
         'aborted': '',
       })[event.error] ?? 'Voice input error. Try again.';
-      if (msg) toast(msg, 'error');
+      // Permission problems get a persistent note (they need user action to fix);
+      // transient ones stay a toast so they clear themselves.
+      if (msg) {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') showMicNote(msg, 'error');
+        else toast(msg, '');
+      }
       resetMic(); setState('READY', 'Say “Hey JARVIS”', '');
     };
 
@@ -100,11 +152,17 @@ export function mountOverview(root, ctx) {
       return;
     }
     listening = true;
+    clearMicNote();                       // permission is granted and we are live
     mic.classList.add('listening');
     mic.setAttribute('aria-pressed', 'true');
     mic.textContent = '● Listening…';
     setState('LISTENING', 'Speak now', 'listening');
   }
+
+  // Explain a disabled mic button up front rather than leaving the user guessing why
+  // clicking it does nothing (the button is disabled, so toggleMic would never run).
+  if (!SR) showMicNote('Voice input needs Chrome or Edge — Firefox and Safari do not support speech recognition.', 'warn');
+  else if (!secureCtx) showMicNote('Voice input needs https:// or localhost. Open http://localhost:8077 rather than an IP address.', 'warn');
 
   const setState = (name, sub, mode) => {
     stateName.textContent = name; stateSub.textContent = sub;
@@ -189,7 +247,8 @@ export function mountOverview(root, ctx) {
     el('div', { class: 'stack' },
       el('div', { class: 'card' }, el('h3', { text: 'Voice' }),
         el('div', { class: 'stage' }, ring, stateName, stateSub, bars),
-        el('div', { class: 'row' }, input, langSelect, mic, el('button', { class: 'btn primary', type: 'button', onClick: send }, 'Send'))),
+        el('div', { class: 'row' }, input, langSelect, mic, el('button', { class: 'btn primary', type: 'button', onClick: send }, 'Send')),
+        micNote),
       el('div', { class: 'card' }, el('h3', { text: 'Agent presence' }), chain, el('div', { style: 'margin-top:12px' }, activity))),
     el('div', { class: 'stack' }, el('div', { class: 'card' }, el('h3', { text: 'Local runtime' }), runtimeBox), tiles)));
 
