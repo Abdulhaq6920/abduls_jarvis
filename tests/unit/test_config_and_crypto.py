@@ -93,7 +93,13 @@ def test_cipher_key_rotation_keeps_old_data_readable():
     rotated = FieldCipher([new, old])  # newest first
     assert rotated.decrypt(legacy) == "written under the old key"
     assert rotated.decrypt(rotated.encrypt("x")) == "x"
-    assert not rotated.encrypt("x").startswith(legacy[:20])
+    # New writes use the FIRST (newest) key: a cipher holding only the old key must be unable
+    # to decrypt them. (Comparing ciphertext prefixes is wrong -- the "enc:v1:" tag plus
+    # Fernet's constant version byte make the first bytes collide by design, which made this
+    # assertion intermittently fail.)
+    old_only = FieldCipher([old])
+    with pytest.raises(DecryptionError):
+        old_only.decrypt(rotated.encrypt("x"))
 
 
 def test_cipher_rejects_tampering_and_wrong_key():
