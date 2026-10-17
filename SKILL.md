@@ -94,7 +94,7 @@ Behind Protocols; swap dev stubs for production engines with env vars. See
 | Speech-to-text | `STTProvider` (`stt.py`, `voice_local.py`) | text source | **Vosk** (default real stack) · faster-whisper (`voice-alt`) | `JARVIS_STT_ENGINE=whisper` |
 | Text-to-speech | `TTSProvider` (`tts.py`, `voice_local.py`) | prints line + voice id | **Windows SAPI via pyttsx3** (default real stack) · Azure / ElevenLabs / Piper | `JARVIS_TTS_ENGINE=pyttsx3` |
 | LLM | `LLMProvider` (`core/llm.py`) | `EchoLLM` | OpenAI / Ollama (OpenAI-compatible) | `JARVIS_LLM_PROVIDER=openai\|ollama`, `JARVIS_LLM_BASE_URL`, `JARVIS_LLM_API_KEY` |
-| Search | `SearchProvider` (`core/search.py`) | `DisabledSearch` | DuckDuckGo / generic JSON (SearxNG) | `JARVIS_SEARCH_PROVIDER=duckduckgo\|generic`, `JARVIS_SEARCH_BASE_URL` |
+| Search | `SearchProvider` (`core/search.py`) | `DisabledSearch` | DuckDuckGo Instant Answer (keyless; other JSON shapes need a `_parse` branch) | `JARVIS_SEARCH_PROVIDER=duckduckgo\|generic`, `JARVIS_SEARCH_BASE_URL` |
 | Router | `Router` (`core/router.py`) | `KeywordRouter` | `LangGraphRouter` | implement Protocol |
 | Scheduler | APScheduler (`jobs.py`) | in-process | persistent store / Celery / RQ | config |
 

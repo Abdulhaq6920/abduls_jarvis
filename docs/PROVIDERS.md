@@ -123,13 +123,16 @@ mirroring the LLM seam:
 
 - `DisabledSearch` — the offline default. No network, no key; `search(...)` returns an empty
   list (never fabricated results). SHURI then honestly reports it found nothing.
-- `GenericJsonSearch` — the real provider over `httpx`. It GETs a DuckDuckGo-shaped JSON
+- `GenericJsonSearch` — the real provider over `httpx`. It GETs a **DuckDuckGo-shaped** JSON
   endpoint and maps the instant-answer abstract plus `RelatedTopics` (recursing one level into
-  grouped topics) into `SearchResult(title, url, snippet)`, capped to the limit. The default
-  engine is the **DuckDuckGo Instant Answer API** (`https://api.duckduckgo.com/`), which is
-  keyless and HTTPS, so it works out of the box; the same class also covers a **SearxNG**
-  `/search?format=json` endpoint (change `JARVIS_SEARCH_BASE_URL`). A Bearer header is sent
-  only when a key is configured.
+  grouped topics) into `SearchResult(title, url, snippet)`, capped to the limit. The one engine
+  it parses today is the **DuckDuckGo Instant Answer API** (`https://api.duckduckgo.com/`), which
+  is keyless and HTTPS, so it works out of the box. A Bearer header is sent only when a key is
+  configured. **Other engines (e.g. SearxNG's `/search?format=json`, whose body is
+  `{"results": [{title, url, content}]}`) have a different JSON shape** — pointing
+  `JARVIS_SEARCH_BASE_URL` at one without extending `_parse` returns no results (honest and
+  non-crashing, but not real hits). To support SearxNG, add a branch to `_parse` for its
+  `results[]` shape; the class is structured for exactly that.
 - `build_search(settings)` — returns `DisabledSearch` for `JARVIS_SEARCH_PROVIDER=none`
   (default) and for a real provider with no base URL; otherwise a `GenericJsonSearch`.
 
@@ -148,13 +151,13 @@ empty list, so a search outage never 500s an `/assist` request.
 `JARVIS_SEARCH_BASE_URL` is a remote `http://` endpoint the provider refuses the request —
 whether or not an API key is set — so neither the query nor a Bearer `JARVIS_SEARCH_API_KEY` is
 transmitted in plaintext; in `prod`, `check-config` fails closed on that configuration.
-Loopback `http://` (local SearxNG) is unaffected. `provider=none` is a valid disabled state and
+Loopback `http://` (a local engine) is unaffected. `provider=none` is a valid disabled state and
 never produces a finding.
 
 | Env | Default | Effect |
 | --- | --- | --- |
 | `JARVIS_SEARCH_PROVIDER` | `none` | `none` (disabled) \| `duckduckgo` \| `generic`. |
-| `JARVIS_SEARCH_BASE_URL` | *(empty)* | DuckDuckGo `https://api.duckduckgo.com/`; SearxNG `/search`. Empty ⇒ falls back to `DisabledSearch`. |
+| `JARVIS_SEARCH_BASE_URL` | *(empty)* | DuckDuckGo `https://api.duckduckgo.com/` (the only shape parsed today). Empty ⇒ falls back to `DisabledSearch`. |
 | `JARVIS_SEARCH_API_KEY` | *(unset)* | `SecretStr`; DuckDuckGo needs none; sent as Bearer for a keyed engine. |
 | `JARVIS_SEARCH_TIMEOUT_SECONDS` | `10` | Per-request timeout. |
 | `JARVIS_SEARCH_MAX_RESULTS` | `5` | Cap on results synthesised. |
