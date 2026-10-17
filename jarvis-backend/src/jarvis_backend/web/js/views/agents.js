@@ -7,15 +7,20 @@ const ACCENT = {
   TONY: '#ff9d4d', SHURI: '#9af0ff', QUICKSILVER: '#d7e3ff', NICK_FURY: '#ff6b6b', DR_STRANGE: '#8ad6a8',
 };
 
-export function speakPreview(text, voice) {
+export function speakPreview(text, voice, langOverride) {
   // Browser approximation of the agent's voice (the real audio is produced by the local
   // runtime). Pitch/speed come from the saved profile so edits are audible straight away.
+  // An optional langOverride lets the Overview console speak the reply in the language the
+  // user picked for voice input, falling back to the agent's own language.
   if (!('speechSynthesis' in window)) { toast('This browser has no speech synthesis.', 'error'); return; }
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.pitch = Math.min(2, Math.max(0, voice.pitch));
   utterance.rate = Math.min(2, Math.max(0.5, voice.speed));
-  utterance.lang = voice.language || 'en-US';
+  utterance.lang = langOverride || voice.language || 'en-US';
+  const prefix = utterance.lang.slice(0, 2).toLowerCase();
+  const match = (window.speechSynthesis.getVoices() || []).find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
+  if (match) utterance.voice = match;
   window.speechSynthesis.speak(utterance);
 }
 

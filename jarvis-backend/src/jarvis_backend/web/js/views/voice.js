@@ -3,6 +3,10 @@ import { api } from '../api.js';
 import { clear, el, pretty, timeAgo, toast } from '../dom.js';
 import { speakPreview } from './agents.js';
 
+// BCP-47 languages offered for browser voice input/output. Edit this list to add more;
+// nothing else hardcodes these codes.
+const LANGS = [['en-US', 'English'], ['hi-IN', 'Hindi'], ['es-ES', 'Spanish'], ['fr-FR', 'French'], ['de-DE', 'German'], ['ar-SA', 'Arabic'], ['zh-CN', 'Chinese']];
+
 export function mountOverview(root, ctx) {
   const ring = el('div', { class: 'ring' }, el('div', { class: 'core' }));
   const bars = el('div', { class: 'bars', 'aria-hidden': 'true' }, Array.from({ length: 7 }, () => el('i')));
@@ -15,6 +19,48 @@ export function mountOverview(root, ctx) {
   const input = el('input', { type: 'text', maxLength: 500, 'aria-label': 'Type a request',
     placeholder: 'Try: ask SHURI to research LangGraph   |   remember that my car is blue' });
   let voices = {};
+
+  // Browser speech INPUT (Web Speech API only; no third-party JS). SpeechRecognition is
+  // Chrome/Edge-only, so the mic button degrades gracefully where it is absent.
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let sessionLang = localStorage.getItem('jarvis.voiceLang') || document.documentElement.lang || 'en-US';
+  let recognition = null;
+  let listening = false;
+
+  const langSelect = el('select', { class: 'btn', 'aria-label': 'Voice language',
+    onChange: (e) => { sessionLang = e.target.value; localStorage.setItem('jarvis.voiceLang', sessionLang); } },
+    LANGS.map(([code, label]) => el('option', { value: code, selected: code === sessionLang }, label)));
+
+  const mic = el('button', { class: 'btn', type: 'button', 'aria-label': 'Start voice input', 'aria-pressed': 'false', onClick: toggleMic }, 'Mic');
+  if (!SR) mic.disabled = true;
+
+  function toggleMic() {
+    if (!SR) { toast('Voice input needs Chrome or Edge', ''); return; }
+    if (listening) { recognition.stop(); return; }
+    window.speechSynthesis.cancel(); // barge-in: stop any reply so the mic can hear
+    recognition = new SR();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = sessionLang;
+    recognition.onresult = (event) => {
+      let transcript = '';
+      for (const result of event.results) transcript += result[0].transcript;
+      input.value = transcript; // interim text live; onend fires send() with the final text
+    };
+    recognition.onend = () => {
+      listening = false; mic.setAttribute('aria-pressed', 'false'); mic.textContent = 'Mic';
+      if (input.value.trim()) send();
+    };
+    recognition.onerror = (event) => {
+      const msg = event.error === 'not-allowed' ? 'Microphone blocked. Allow mic access.'
+        : event.error === 'no-speech' ? 'No speech detected.' : 'Voice input error.';
+      toast(msg, ''); listening = false; mic.setAttribute('aria-pressed', 'false'); mic.textContent = 'Mic';
+      setState('READY', 'Say “Hey JARVIS”', '');
+    };
+    listening = true; mic.setAttribute('aria-pressed', 'true'); mic.textContent = 'Stop';
+    setState('LISTENING', 'Speak now', 'listening');
+    recognition.start();
+  }
 
   const setState = (name, sub, mode) => {
     stateName.textContent = name; stateSub.textContent = sub;
@@ -62,7 +108,7 @@ export function mountOverview(root, ctx) {
       clear(chain, agents.map((a, i) => [i ? el('span', { class: 'arrow', text: '→' }) : null, el('span', { class: `chip ${a === r.responding_agent ? 'lead' : ''}`, text: pretty(a) })]));
       activity.textContent = `${r.delegation_note ? `${r.delegation_note}  ` : ''}“${r.speech}”`;
       setState('SPEAKING', pretty(r.responding_agent), 'active');
-      const v = voices[r.responding_agent]; if (v) speakPreview(r.speech, v);
+      const v = voices[r.responding_agent]; if (v) speakPreview(r.speech, v, sessionLang);
       setTimeout(() => setState('READY', 'Say “Hey JARVIS”', ''), 2500);
     } catch (error) { setState('READY', 'Say “Hey JARVIS”', ''); toast(error.message, 'error'); }
     refresh().catch(() => {});
@@ -73,7 +119,7 @@ export function mountOverview(root, ctx) {
     el('div', { class: 'stack' },
       el('div', { class: 'card' }, el('h3', { text: 'Voice' }),
         el('div', { class: 'stage' }, ring, stateName, stateSub, bars),
-        el('div', { class: 'row' }, input, el('button', { class: 'btn primary', type: 'button', onClick: send }, 'Send'))),
+        el('div', { class: 'row' }, input, langSelect, mic, el('button', { class: 'btn primary', type: 'button', onClick: send }, 'Send'))),
       el('div', { class: 'card' }, el('h3', { text: 'Agent presence' }), chain, el('div', { style: 'margin-top:12px' }, activity))),
     el('div', { class: 'stack' }, el('div', { class: 'card' }, el('h3', { text: 'Local runtime' }), runtimeBox), tiles)));
 
