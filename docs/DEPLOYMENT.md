@@ -28,6 +28,13 @@ JARVIS_REDIS_URL=rediss://:PASSWORD@redis-host:6380/0
 Then `python -m jarvis_backend migrate` once, and `serve` and `worker` as separate processes.
 `worker` must run as exactly one instance; it is the only process that fires scheduled jobs.
 
+`migrate` runs Alembic `upgrade head` for both a fresh install and when **upgrading an
+existing database** in place (same command, no data loss). The PostgreSQL migration path
+needs the sync driver from the `migrations` extra:
+`pip install -e "jarvis-backend[migrations]"` (adds `psycopg2-binary`); the app runtime keeps
+using the async `asyncpg` driver. See `docs/OPERATIONS.md` for creating a new revision after a
+model change.
+
 Managed providers (RDS, Azure, Neon, Supabase, Upstash) work: paste their connection string.
 Both `postgres://` and `postgresql://` forms are accepted and rewritten for the async driver.
 

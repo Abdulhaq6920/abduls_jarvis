@@ -144,22 +144,48 @@ with the step-up endpoint and the grant is accepted for `JARVIS_STEP_UP_WINDOW_S
    (`mfa_enabled=false`, `mfa_secret=NULL`, `mfa_recovery_hashes=NULL`) so the user can re-enroll;
    or disable then recreate the account.
 
-**Schema note (no Alembic yet):** fresh databases get the new `users.mfa_*` and
-`sessions.step_up_at` columns automatically via `create_all`. An **existing** production database
-needs a one-time manual migration until Phase 5 adds Alembic, e.g.:
+## Database migrations (`migrate`)
 
-```sql
-ALTER TABLE users ADD COLUMN mfa_secret TEXT;
-ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN mfa_last_counter INTEGER;
-ALTER TABLE users ADD COLUMN mfa_recovery_hashes TEXT;
-ALTER TABLE users ADD COLUMN mfa_state_version INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE sessions ADD COLUMN step_up_at TIMESTAMPTZ;
+Schema changes are versioned with Alembic. One command handles both a **fresh install** and
+**upgrading an existing database** — in place, without dropping data:
+
+```powershell
+python -m jarvis_backend migrate
 ```
+
+What it does, in order:
+
+1. If Alembic is installed, it runs `alembic upgrade head` against the SAME database the app
+   resolves (`Settings.effective_database_url`, converted to a sync driver). The baseline
+   revision creates the full current schema; later revisions apply any pending changes.
+2. If Alembic is **not** installed (e.g. a minimal dev venv), it logs a warning and falls back
+   to `create_schema()` — which creates any missing *tables* — so dev keeps working.
+3. On SQLite, it then runs an additive-only backfill that adds any missing *columns* to
+   existing tables (`create_all` never adds columns to a table that already exists). This is
+   what repairs an old dev DB that predates the `mfa_*` / `sessions.step_up_at` columns and
+   would otherwise crash with `no such column: users.mfa_secret`. It is additive-only
+   (`ADD COLUMN`), never destructive, and idempotent, so running `migrate` twice is a no-op.
 
 `mfa_state_version` is the compare-and-set generation that keeps MFA enrollment, enablement
 and recovery-code consumption atomic across concurrent requests on every backend (SQLite
-included); it must default to `0` for existing rows.
+included); the backfill adds it as `NOT NULL DEFAULT 0`, so existing rows get `0`.
+
+In dev, `serve` also runs the SQLite additive backfill once at startup, so a stale local DB
+self-heals even if you forget to run `migrate`. Production never does this implicitly — run
+`migrate` once before starting.
+
+**Creating a new revision after a model change:**
+
+```powershell
+pip install -e "jarvis-backend[migrations]"      # alembic + psycopg2-binary (sync driver)
+cd jarvis-backend
+alembic revision --autogenerate -m "describe the change"
+# review the generated file in migrations/versions/, then commit it
+python -m jarvis_backend migrate                 # apply it (upgrade head)
+```
+
+For PostgreSQL the migration path needs the sync driver from the `migrations` extra
+(`psycopg2-binary`); the application runtime keeps using the async `asyncpg` driver.
 
 ## Incident response
 

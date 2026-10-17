@@ -146,13 +146,16 @@ Each phase is independently shippable. Earlier phases are prerequisites for late
   has MFA. Config: `JARVIS_MFA_ISSUER`, `JARVIS_MFA_RECOVERY_CODES`, `JARVIS_STEP_UP_WINDOW_SECONDS`.
 - **Exit:** an MFA login requires a second factor; a DANGEROUS approval re-prompts. ✅
 - WebAuthn/passkeys remain future work.
-- **Note (no Alembic yet):** schema changes are picked up on fresh databases via `create_all`.
-  Existing production databases need a one-time manual `ALTER TABLE` (see OPERATIONS.md) until
-  Phase 5 adds migrations.
+- **Note (migrations):** `python -m jarvis_backend migrate` handles both fresh installs and
+  upgrading an existing database in place (Alembic `upgrade head`, with a safe additive
+  fallback for dev SQLite). See the Phase 5 entry and `docs/OPERATIONS.md`.
 
 ### Phase 5 — Deploy for real
-- **Add Alembic migrations.** Today `create_schema()` is `create_all` only — fine for a first
-  install, unsafe for any non-additive schema change. Do this before the first prod schema change.
+- [x] **Add Alembic migrations.** `migrate` now runs Alembic `upgrade head` (baseline revision
+  captures the current schema; future changes via `alembic revision --autogenerate`). When
+  Alembic is absent it falls back to `create_schema` plus an additive SQLite column backfill,
+  so a stale dev DB (missing `mfa_*`/`step_up_at`) is upgraded in place without the
+  `no such column` crash and without data loss. Idempotent; see `docs/OPERATIONS.md`.
 - Build and run the Docker Compose stack end to end (currently statically checked only).
 - Terminate TLS in front; set `JARVIS_PUBLIC_ORIGIN=https://…`, `JARVIS_ALLOWED_HOSTS`.
 - Move encryption keys to a KMS/Vault; ship audit log to append-only storage (defeats the known

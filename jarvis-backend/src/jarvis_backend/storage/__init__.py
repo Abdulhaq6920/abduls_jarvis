@@ -7,10 +7,11 @@ from jarvis_backend.storage.identity import DeviceStore, SessionStore, UserStore
 from jarvis_backend.storage.job_runs import JobRunStore
 from jarvis_backend.storage.kv import KeyValueStore
 from jarvis_backend.storage.memory import MemoryStore
+from jarvis_backend.storage.schema_guard import ensure_additive_columns
 from jarvis_backend.storage.turns import TurnStore
 
 __all__ = [
     "AgentSettingsStore", "ApprovalStore", "AuditLog", "Database", "DeviceStore",
     "JobRunStore", "KeyValueStore", "MemoryStore", "SessionStore", "TurnStore",
-    "UserStore", "utcnow",
+    "UserStore", "ensure_additive_columns", "utcnow",
 ]

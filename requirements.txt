@@ -56,6 +56,16 @@ redis==8.1.0
 asyncpg==0.32.0
 
 # -----------------------------------------------------------------------------
+# Schema migrations / ops path (optional extra: jarvis-backend[migrations])
+# NOT imported by the async runtime: `python -m jarvis_backend migrate` imports
+# alembic lazily and falls back to create_schema + an additive column backfill
+# when it is absent. psycopg2-binary is the SYNC Postgres driver alembic uses for
+# migrations; the application keeps using asyncpg.
+# -----------------------------------------------------------------------------
+alembic==1.13.3
+psycopg2-binary==2.9.10
+
+# -----------------------------------------------------------------------------
 # Backend auth / security (jarvis-backend)
 # -----------------------------------------------------------------------------
 PyJWT==2.15.1

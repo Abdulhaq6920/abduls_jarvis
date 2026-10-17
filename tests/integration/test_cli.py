@@ -225,6 +225,161 @@ def test_enroll_mfa_enrolls_with_a_valid_code_and_persists_only_hashes(workdir, 
     get_settings.cache_clear()
 
 
+# --------------------------------------------------------------- migrate / schema upgrade
+#
+# `migrate` must (1) build a working schema on a fresh DB and (2) upgrade a STALE existing
+# SQLite DB in place -- the exact "no such column: users.mfa_secret" crash from an old DB
+# created before the MFA columns landed. These drive the CLI directly and run WITHOUT
+# alembic (the fallback create_schema + additive-column path), so they pass in a venv that
+# has no alembic. A separate test documents the alembic path via importorskip.
+
+_OLD_USERS_DDL = """
+CREATE TABLE users (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    username VARCHAR(64) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(16) NOT NULL,
+    disabled BOOLEAN NOT NULL,
+    created_at DATETIME NOT NULL,
+    password_changed_at DATETIME NOT NULL,
+    last_login_at DATETIME
+)
+"""
+
+
+def _db_path(settings) -> Path:
+    return settings.data_dir / "jarvis.db"
+
+
+def _downgrade_users_to_pre_mfa(db_path: Path) -> None:
+    """Rewrite the users table in an existing SQLite file to its pre-MFA shape (no mfa_*)."""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DROP TABLE users")
+        conn.execute(_OLD_USERS_DDL)
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role, disabled, "
+            "created_at, password_changed_at) VALUES "
+            "('u1', 'legacy', 'hash', 'admin', 0, '2024-01-01 00:00:00', '2024-01-01 00:00:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_secrets(workdir):
+    """Create a .env with real secrets and clear the settings cache for the next command."""
+    from jarvis_backend.config import get_settings
+    shutil.copy(ROOT / ".env.example", workdir / ".env")
+    assert main(["init-secrets"]) == 0
+    get_settings.cache_clear()
+
+
+def _users_query_ok(username: str) -> bool:
+    """Open a Container on the CLI's settings and run a UserStore query that touches mfa_*."""
+    import asyncio
+
+    from jarvis_backend.config import get_settings
+    from jarvis_backend.container import Container
+
+    async def run():
+        c = await Container.create(get_settings(), create_schema=False)
+        try:
+            await c.auth.users.by_username(username)  # SELECTs mfa_secret etc.
+            return True
+        finally:
+            await c.close()
+
+    return asyncio.run(run())
+
+
+def test_migrate_fresh_db_builds_a_working_schema(workdir):
+    """A `migrate` on an empty data dir yields a schema that supports an insert+select."""
+    import asyncio
+
+    from jarvis_backend.config import get_settings
+    from jarvis_backend.container import Container
+    from jarvis_backend.auth.passwords import hash_password
+    _seed_secrets(workdir)
+
+    assert main(["migrate"]) == 0
+    get_settings.cache_clear()
+
+    async def roundtrip():
+        c = await Container.create(get_settings(), create_schema=False)
+        try:
+            await c.auth.users.create("owner", await hash_password("correct horse battery staple"))
+            row = await c.auth.users.by_username("owner")
+            assert row is not None and row.mfa_enabled is False and row.mfa_state_version == 0
+        finally:
+            await c.close()
+
+    asyncio.run(roundtrip())
+    get_settings.cache_clear()
+
+
+def test_migrate_upgrades_a_stale_db_without_the_no_such_column_crash(workdir):
+    """Reproduce and fix `no such column: users.mfa_secret` on an existing SQLite DB."""
+    from jarvis_backend.config import get_settings
+    _seed_secrets(workdir)
+
+    # First migrate creates a current DB...
+    assert main(["migrate"]) == 0
+    get_settings.cache_clear()
+    settings = get_settings()
+    get_settings.cache_clear()
+
+    # ...then simulate an OLD DB (users table missing every mfa_* column).
+    _downgrade_users_to_pre_mfa(_db_path(settings))
+
+    # A second migrate must repair it in place (ADD COLUMN), not delete the DB.
+    assert main(["migrate"]) == 0
+    get_settings.cache_clear()
+
+    # The legacy row survived and a query selecting mfa_secret no longer crashes.
+    assert _users_query_ok("legacy") is True
+    get_settings.cache_clear()
+
+
+def test_migrate_is_idempotent_on_an_already_current_db(workdir):
+    """Running migrate twice on a current DB is a clean no-op (returns 0 each time)."""
+    from jarvis_backend.config import get_settings
+    _seed_secrets(workdir)
+    assert main(["migrate"]) == 0
+    get_settings.cache_clear()
+    assert main(["migrate"]) == 0
+    get_settings.cache_clear()
+
+
+def test_alembic_upgrade_path_is_available_when_installed(workdir, tmp_path):
+    """If alembic IS installed, the baseline revision builds the full schema from scratch.
+
+    Guarded by importorskip so it is simply skipped in the alembic-less test venv; the
+    fallback path above is what guarantees the crash fix there.
+    """
+    pytest.importorskip("alembic")
+    from alembic import command
+    from alembic.config import Config
+
+    ini = ROOT / "jarvis-backend" / "alembic.ini"
+    assert ini.exists()
+    url = f"sqlite:///{(tmp_path / 'alembic.db').as_posix()}"
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(ini.parent / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(cfg, "head")
+
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "alembic.db")
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    finally:
+        conn.close()
+    assert {"mfa_secret", "mfa_enabled", "mfa_state_version"} <= cols
+
+
 def test_env_template_has_no_real_secrets():
     """The committed example must stay a template: every secret field is empty."""
     values = env_values(ROOT / ".env.example")

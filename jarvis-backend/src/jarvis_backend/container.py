@@ -76,6 +76,15 @@ class Container:
         # `migrate` step once, so replicas never race to create the schema.
         if create_schema if create_schema is not None else settings.env == "dev":
             await db.create_schema()
+            # create_all makes missing TABLES but never missing COLUMNS, so a dev SQLite DB
+            # from before the mfa_*/step_up_at columns would still crash on first query. The
+            # additive backfill adds just those columns in place (SQLite-only, idempotent,
+            # never destructive); prod/Postgres go through `migrate` and are untouched.
+            if settings.env == "dev" and db.is_sqlite:
+                from jarvis_backend.storage import ensure_additive_columns
+                added = await ensure_additive_columns(db)
+                if added:
+                    log.info("startup added missing columns", extra={"columns": added})
 
         cache = build_cache(settings.redis_url_value, settings.cache_max_local_items)
         limiter = RateLimiter(cache)

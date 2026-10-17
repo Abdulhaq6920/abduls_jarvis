@@ -83,18 +83,77 @@ def cmd_worker(_: argparse.Namespace) -> int:
     return 0
 
 
+def _alembic_ini_path() -> Optional[Path]:
+    """Locate the committed ``alembic.ini`` (sibling of the ``src/`` package tree).
+
+    Resolved relative to this module so the migration path never depends on the current
+    working directory. Returns None if it cannot be found (e.g. a slimmed install), which
+    makes ``migrate`` fall back to the create_schema + additive path.
+    """
+    # .../jarvis-backend/src/jarvis_backend/__main__.py -> .../jarvis-backend/alembic.ini
+    candidate = Path(__file__).resolve().parents[2] / "alembic.ini"
+    return candidate if candidate.exists() else None
+
+
+def _sync_migration_url(async_url: str) -> str:
+    """App async URL -> the sync driver Alembic uses (mirrors migrations/env.py)."""
+    if async_url.startswith("sqlite+aiosqlite"):
+        return "sqlite" + async_url[len("sqlite+aiosqlite"):]
+    if async_url.startswith("postgresql+asyncpg"):
+        return "postgresql+psycopg2" + async_url[len("postgresql+asyncpg"):]
+    return async_url
+
+
+def _run_alembic_upgrade(settings: Settings) -> bool:
+    """Run ``alembic upgrade head`` if alembic (and the scaffolding) are available.
+
+    Returns True when the upgrade ran, False when alembic is not installed or the config
+    cannot be located so the caller degrades to create_schema + the additive backfill.
+    Never logs the database URL (it may embed a password).
+    """
+    try:
+        from alembic import command
+        from alembic.config import Config
+    except ImportError:
+        log.warning("alembic not installed; using create_schema + additive column backfill")
+        return False
+    ini = _alembic_ini_path()
+    if ini is None:
+        log.warning("alembic installed but migrations config not found; "
+                    "using create_schema + additive column backfill")
+        return False
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(ini.parent / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", _sync_migration_url(settings.effective_database_url))
+    command.upgrade(cfg, "head")
+    log.info("alembic upgrade head complete")
+    return True
+
+
 def cmd_migrate(_: argparse.Namespace) -> int:
     from jarvis_backend.crypto import FieldCipher, set_cipher
-    from jarvis_backend.storage import Database
+    from jarvis_backend.storage import Database, ensure_additive_columns
 
     settings = get_settings()
     _setup("migrate", settings)
     set_cipher(FieldCipher.from_setting(settings.secret("data_key")))
 
+    ran_alembic = _run_alembic_upgrade(settings)
+
     async def run() -> None:
         db = Database(settings)
-        await db.create_schema()
-        await db.dispose()
+        try:
+            # Fallback path (no alembic): create_all makes any missing TABLES. On either
+            # path, the additive backfill then adds any missing COLUMNS to existing SQLite
+            # tables so a stale dev DB (missing mfa_*/step_up_at) is repaired in place
+            # without deleting data. Both steps are idempotent, so running twice is a no-op.
+            if not ran_alembic:
+                await db.create_schema()
+            added = await ensure_additive_columns(db)
+            if added:
+                log.info("added missing columns", extra={"columns": added})
+        finally:
+            await db.dispose()
 
     asyncio.run(run())
     log.info("schema ready", extra={"database": settings.describe()["database"]})
