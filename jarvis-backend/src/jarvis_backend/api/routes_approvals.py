@@ -17,6 +17,7 @@ from jarvis_backend.auth.deps import ADMIN, AGENT, admin_only, agent_only, any_r
 from jarvis_backend.auth.service import Principal
 from jarvis_backend.container import Container
 from jarvis_backend.schemas import ApprovalDecision, ApprovalOut, ApprovalResult
+from jarvis_shared.security import RiskLevel
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
@@ -37,6 +38,8 @@ async def granted(c: Container = Depends(get_container)) -> list:
 # Risk levels that force a step-up on a GRANT, keyed by the configured threshold. SAFE is
 # never gated; DANGEROUS always is; RESTRICTED only when the threshold is lowered to it.
 _STEP_UP_RISK = {"DANGEROUS": {"DANGEROUS"}, "RESTRICTED": {"DANGEROUS", "RESTRICTED"}}
+# The complete set of risk values the gate recognizes; anything else is ambiguous and denied.
+_KNOWN_RISKS = {r.value for r in RiskLevel}
 
 
 async def _enforce_high_risk_step_up(approval_id: str, body: ApprovalDecision,
@@ -50,7 +53,17 @@ async def _enforce_high_risk_step_up(approval_id: str, body: ApprovalDecision,
     """
     gated = _STEP_UP_RISK[c.settings.approval_step_up_risk]
     pending = await c.approvals.get(approval_id)
-    if pending is None or pending.status != "PENDING" or pending.risk not in gated:
+    if pending is None or pending.status != "PENDING":
+        return
+    # Fail closed on an ambiguous risk: a value outside the known enum (corrupted row,
+    # version skew, unexpected producer) must NOT be treated as "below threshold" and
+    # waved through. Validate against the full RiskLevel set first, then gate.
+    if pending.risk not in _KNOWN_RISKS:
+        await c.audit.record("approval_step_up_denied", approval_id=approval_id,
+                             by=principal.subject, risk=pending.risk, reason="unknown_risk")
+        raise HTTPException(403, "This approval has an unrecognized risk level and cannot be "
+                                 "granted. Review it manually.")
+    if pending.risk not in gated:
         return
     if await c.auth.mfa_enabled_for(principal.subject):
         try:

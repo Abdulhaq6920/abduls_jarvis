@@ -73,12 +73,20 @@ class UserStore:
                 mfa_recovery_hashes=None))
 
     async def enable_mfa(self, user_id: str, recovery_hashes: List[str],
-                         last_counter: Optional[int] = None) -> None:
-        """Flip MFA on after a correct code confirmed the pending secret."""
+                         last_counter: Optional[int] = None) -> bool:
+        """Flip MFA on after a correct code confirmed the pending secret.
+
+        Conditional on the row still being in the pending state (a secret set, not yet
+        enabled): two concurrent confirmations cannot both win and each hand out a
+        distinct recovery-code set. Only the caller whose UPDATE changed a row (returns
+        True) may show its codes; the loser returns False and shows nothing."""
         async with self._db.session() as s:
-            await s.execute(update(UserRow).where(UserRow.id == user_id).values(
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(False),
+                UserRow.mfa_secret.is_not(None)).values(
                 mfa_enabled=True, mfa_recovery_hashes=list(recovery_hashes),
                 mfa_last_counter=last_counter))
+            return res.rowcount == 1
 
     async def disable_mfa(self, user_id: str) -> None:
         async with self._db.session() as s:
@@ -86,23 +94,39 @@ class UserStore:
                 mfa_secret=None, mfa_enabled=False, mfa_last_counter=None,
                 mfa_recovery_hashes=None))
 
-    async def set_mfa_counter(self, user_id: str, counter: int) -> None:
-        """Record the last-used TOTP counter so the same step cannot be replayed."""
-        async with self._db.session() as s:
-            await s.execute(update(UserRow).where(UserRow.id == user_id)
-                            .values(mfa_last_counter=counter))
+    async def advance_mfa_counter(self, user_id: str, counter: int,
+                                  previous: Optional[int]) -> bool:
+        """Compare-and-set the last-used TOTP counter: succeed only if the stored counter
+        is still ``previous`` AND the new counter is strictly greater.
 
-    async def consume_recovery_hash(self, user_id: str, index: int) -> bool:
-        """Remove a single recovery-code hash (single-use). False if it no longer exists.
-
-        Done under one session with a status-quo check so two parallel logins cannot both
-        spend the same code."""
+        This closes the replay race: two requests reading the same stored counter and
+        matching the same TOTP cannot both advance -- exactly one UPDATE affects a row.
+        The ``counter > mfa_last_counter`` guard also rejects an already-passed step even
+        if ``previous`` was read as stale-null by a racing caller."""
         async with self._db.session() as s:
-            row = await s.get(UserRow, user_id)
+            prev_clause = (UserRow.mfa_last_counter.is_(None) if previous is None
+                           else UserRow.mfa_last_counter == previous)
+            res = await s.execute(update(UserRow).where(
+                UserRow.id == user_id, UserRow.mfa_enabled.is_(True), prev_clause).values(
+                mfa_last_counter=counter))
+            return res.rowcount == 1
+
+    async def consume_recovery_hash(self, user_id: str, expected_hash: str) -> bool:
+        """Remove a single recovery-code hash (single-use), keyed by the matched hash.
+
+        Atomic read-modify-write under a row lock: the row is selected FOR UPDATE so two
+        parallel logins presenting the same code serialize on it -- the first removes the
+        hash and commits, the second re-reads, finds it gone, and returns False. Removing
+        by VALUE, not index, also avoids deleting the wrong code after a list shift. The
+        recovery list is a field-encrypted opaque blob, so the compare-and-set cannot be
+        pushed into SQL; the row lock is what makes it safe on a concurrent backend."""
+        async with self._db.session() as s:
+            row = (await s.execute(
+                select(UserRow).where(UserRow.id == user_id).with_for_update())).scalar_one_or_none()
             hashes = list(row.mfa_recovery_hashes or []) if row else []
-            if row is None or index < 0 or index >= len(hashes):
+            if row is None or expected_hash not in hashes:
                 return False
-            del hashes[index]
+            hashes.remove(expected_hash)
             row.mfa_recovery_hashes = hashes
             return True
 

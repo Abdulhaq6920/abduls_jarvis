@@ -83,6 +83,9 @@ class MfaRequired:
 
 
 MFA_PENDING_TTL = 300  # seconds the mfa_pending token is valid (one login attempt)
+# One non-enumerating message for every MFA-login failure (expired challenge, bad account,
+# wrong code): the client must not be able to distinguish the cause.
+_MFA_LOGIN_FAIL = "Your sign-in could not be completed. Start again."
 
 
 class AuthService:
@@ -135,27 +138,40 @@ class AuthService:
         return issued[0]
 
     # ------------------------------------------------------------------------- mfa
-    async def _check_second_factor(self, user, code: str) -> bool:
+    async def _check_second_factor(self, user, code: Optional[str]) -> bool:
         """True if ``code`` is a valid TOTP (no replay) or an unused recovery code.
 
         On a TOTP match the last-used counter is advanced; on a recovery match that code is
-        consumed. Fails CLOSED on a missing secret or any ambiguity."""
-        if not user.mfa_secret:
+        consumed. Fails CLOSED on a missing secret, a missing/empty code, or any ambiguity."""
+        if not user.mfa_secret or not code:
             return False
         counter = totp.verify(user.mfa_secret, code, last_counter=user.mfa_last_counter)
         if counter is not None:
-            await self.users.set_mfa_counter(user.id, counter)
-            return True
-        for index, stored in enumerate(list(user.mfa_recovery_hashes or [])):
+            # Compare-and-set: only the request that actually advances the stored counter
+            # from the value it read wins. A racing duplicate with the same step loses the
+            # UPDATE and is rejected -- no replay, even on a concurrent backend.
+            return await self.users.advance_mfa_counter(user.id, counter, user.mfa_last_counter)
+        for stored in list(user.mfa_recovery_hashes or []):
             if await verify_hash(stored, code):
-                return await self.users.consume_recovery_hash(user.id, index)
+                # Consume by the matched hash so two parallel logins cannot both spend one
+                # code: whichever transaction removes it first wins; the other finds it gone.
+                return await self.users.consume_recovery_hash(user.id, stored)
         return False
 
     async def start_mfa_enrollment(self, principal: Principal) -> tuple[str, str]:
-        """Generate a fresh (unconfirmed) secret and the otpauth URI for an admin."""
+        """Generate a fresh (unconfirmed) secret and the otpauth URI for an admin.
+
+        Enrollment is REFUSED while MFA is already enabled: a live session (possibly
+        stolen) must not be able to clear an active factor and fall back to the non-MFA
+        approval path. Rotating a factor requires disabling it first (password + a valid
+        current code), which keeps the old factor live until the holder proves it."""
         user = await self.users.by_id(principal.subject)
         if user is None:
             raise _unauthorized()
+        if user.mfa_enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "MFA is already enabled. Disable it first (requires your password "
+                                "and a current code) to enroll a new authenticator.")
         secret = totp.generate_secret()
         await self.users.set_mfa_pending(user.id, secret)
         uri = totp.otpauth_uri(secret, account=user.username, issuer=self._s.mfa_issuer)
@@ -176,11 +192,16 @@ class AuthService:
         # Do not seed last_counter from the confirmation step: enrollment confirm is not a
         # login, and seeding it would reject a code generated in the same 30s window at the
         # first real sign-in. Replay protection begins at the first authentication.
-        await self.users.enable_mfa(user.id, hashes, last_counter=None)
+        # enable_mfa is conditional on the still-pending state, so two concurrent
+        # confirmations cannot each enable + hand out a distinct recovery set: only the
+        # winner's UPDATE changes a row and may reveal its codes; the loser fails closed.
+        if not await self.users.enable_mfa(user.id, hashes, last_counter=None):
+            raise HTTPException(status.HTTP_409_CONFLICT, "No pending MFA enrollment to confirm.")
         await self._audit.record("mfa_enabled", user=user.username)
         return codes
 
-    async def disable_mfa(self, principal: Principal, current_password: str, code: str) -> None:
+    async def disable_mfa(self, principal: Principal, current_password: str,
+                          code: Optional[str]) -> None:
         """Require BOTH a correct password AND a valid second factor (never password alone)."""
         user = await self.users.by_id(principal.subject)
         if user is None or not user.mfa_enabled:
@@ -197,19 +218,21 @@ class AuthService:
     async def complete_mfa_login(self, mfa_token: str, code: str, ip: str,
                                  user_agent: str) -> IssuedTokens:
         """Second login step: redeem an mfa_pending token with a TOTP/recovery code."""
+        # Non-enumerating: an expired/invalid challenge, an unusable account, and a wrong
+        # code all fail with the SAME 401 message so an attacker cannot tell them apart.
         try:
             claims = self._codec.verify_special(mfa_token, expected_typ=MFA_PENDING)
         except TokenError:
-            raise _unauthorized("Your sign-in attempt expired. Start again.") from None
+            raise _unauthorized(_MFA_LOGIN_FAIL) from None
         user = await self.users.by_id(claims.sub)
         name = user.username if user else claims.sub[:64]
         # The same three limits as the password step: the second factor is throttled too.
         pair_key = await self._enforce_login_limits(name, ip)
         if user is None or user.disabled or not user.mfa_enabled:
-            raise _unauthorized("Your sign-in attempt expired. Start again.")
+            raise _unauthorized(_MFA_LOGIN_FAIL)
         if not await self._check_second_factor(user, code):
             await self._audit.record("mfa_login_failed", ip=ip, user=user.username)
-            raise _unauthorized("That code is not valid.")
+            raise _unauthorized(_MFA_LOGIN_FAIL)
         await self._cache.delete("rl:" + pair_key)
         await self.users.touch_login(user.id)
         issued = await self._open_session(user.id, user.username, user.role, None,
@@ -239,8 +262,13 @@ class AuthService:
             await self.verify_step_up(principal, inline_code)
             return
         row = await self.sessions.get(principal.sid)
-        fresh = (row is not None and row.step_up_at is not None
-                 and utcnow() - row.step_up_at <= timedelta(seconds=self._s.step_up_window_seconds))
+        # Age must be within [0, window]: a future-dated step_up_at (clock rollback or
+        # malformed persistence) has a NEGATIVE age and must NOT pass -- fail closed on it
+        # rather than treating "not yet expired" as "fresh".
+        fresh = False
+        if row is not None and row.step_up_at is not None:
+            age = utcnow() - row.step_up_at
+            fresh = timedelta(0) <= age <= timedelta(seconds=self._s.step_up_window_seconds)
         if not fresh:
             raise _unauthorized("Re-authentication required: confirm your second factor to "
                                 "approve a high-risk action.")

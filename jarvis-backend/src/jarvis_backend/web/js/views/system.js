@@ -126,16 +126,37 @@ export function mountSystem(root) {
   };
 
   const mfaEnabledView = () => {
-    const disable = async () => {
-      const current = window.prompt('Current password:'); if (!current) return;
-      const code = window.prompt('Authenticator code or a recovery code:'); if (!code) return;
-      try { await api('/api/auth/mfa/disable', { method: 'POST', body: { current_password: current, code: code.trim() } });
-        toast('MFA disabled', 'ok'); await loadMfa.after(); }
-      catch (e) { toast(e.message, 'error'); }
+    const panel = el('div');
+    const showDisableForm = () => {
+      // CSP-compliant inline form: the password uses type="password" so it is masked on
+      // screen (never a window.prompt, which renders the password in clear text). The code
+      // is a separate bounded input accepting a TOTP or a recovery code.
+      const pw = el('input', { type: 'password', autocomplete: 'current-password', maxLength: 128,
+        placeholder: 'Current password', 'aria-label': 'Current password' });
+      const code = el('input', { type: 'text', inputmode: 'numeric', maxLength: 14, autocomplete: 'one-time-code',
+        placeholder: 'Authenticator or recovery code', 'aria-label': 'Authenticator or recovery code' });
+      const submit = async () => {
+        if (!pw.value || !code.value.trim()) { toast('Enter your password and a code.', 'error'); return; }
+        try {
+          await api('/api/auth/mfa/disable', { method: 'POST', body: { current_password: pw.value, code: code.value.trim() } });
+          pw.value = ''; code.value = ''; toast('MFA disabled', 'ok'); await loadMfa.after();
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      clear(panel,
+        el('p', { class: 'muted', text: 'Disabling MFA needs your current password and a current authenticator or recovery code.' }),
+        el('div', { class: 'row', style: 'margin-top:8px' }, pw),
+        el('div', { class: 'row', style: 'margin-top:8px' }, code),
+        el('div', { class: 'row', style: 'margin-top:12px' },
+          el('button', { class: 'btn danger', type: 'button', onClick: submit }, 'Confirm disable'),
+          el('button', { class: 'btn', type: 'button', onClick: renderStatus }, 'Cancel')));
     };
-    return el('div', {}, el('div', { class: 'row' }, el('span', { class: 'badge ok', text: 'ENABLED' }),
-      el('span', { class: 'muted', text: 'A code from your authenticator is required at sign-in and to approve high-risk actions.' })),
-      el('div', { class: 'row', style: 'margin-top:12px' }, el('button', { class: 'btn danger', type: 'button', onClick: disable }, 'Disable MFA')));
+    const renderStatus = () => clear(panel,
+      el('div', { class: 'row' }, el('span', { class: 'badge ok', text: 'ENABLED' }),
+        el('span', { class: 'muted', text: 'A code from your authenticator is required at sign-in and to approve high-risk actions.' })),
+      el('div', { class: 'row', style: 'margin-top:12px' },
+        el('button', { class: 'btn danger', type: 'button', onClick: showDisableForm }, 'Disable MFA')));
+    renderStatus();
+    return panel;
   };
 
   loadMfa.after = () => loadMfa().catch((e) => toast(e.message, 'error'));

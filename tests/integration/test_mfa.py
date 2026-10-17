@@ -201,3 +201,163 @@ def test_separation_of_duties_holds_for_agent(client, admin, agent):
     aid = _pending_approval(client, "DANGEROUS")
     # The agent/device role can never decide an approval, MFA or not.
     assert client.post(f"/api/approvals/{aid}/decision", headers=agent, json={"granted": True}).status_code == 403
+
+
+def _admin_session_id(client):
+    """The current admin's (only) live session id, read through the store."""
+    container = client.app.state.container
+
+    async def find():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        rows = await container.auth.sessions.list_for_user(user.id)
+        return rows[0].id
+
+    return _run(find())
+
+
+def _set_step_up_at(client, session_id, moment):
+    container = client.app.state.container
+    _run(container.auth.sessions.mark_step_up(session_id, at=moment))
+
+
+def test_stale_step_up_is_refused_but_fresh_within_window_succeeds(client, admin):
+    from datetime import timedelta
+
+    from jarvis_backend.storage.db import utcnow
+    enroll_mfa(client, admin)
+    sid = _admin_session_id(client)
+    window = client.app.state.container.settings.step_up_window_seconds
+
+    # A step-up older than the window must NOT authorize a high-risk grant.
+    _set_step_up_at(client, sid, utcnow() - timedelta(seconds=window + 60))
+    stale_aid = _pending_approval(client, "DANGEROUS")
+    r = client.post(f"/api/approvals/{stale_aid}/decision", headers=admin, json={"granted": True})
+    assert r.status_code == 401
+    assert client.get(f"/api/approvals/{stale_aid}", headers=admin).json()["status"] == "PENDING"
+
+    # A step-up well inside the window authorizes it.
+    _set_step_up_at(client, sid, utcnow() - timedelta(seconds=1))
+    fresh_aid = _pending_approval(client, "DANGEROUS")
+    ok = client.post(f"/api/approvals/{fresh_aid}/decision", headers=admin, json={"granted": True})
+    assert ok.status_code == 200 and ok.json()["status"] == "GRANTED"
+
+
+def test_future_dated_step_up_is_refused(client, admin):
+    from datetime import timedelta
+
+    from jarvis_backend.storage.db import utcnow
+    enroll_mfa(client, admin)
+    sid = _admin_session_id(client)
+    # A future step_up_at (clock rollback / tampering) has a negative age and must fail closed,
+    # not be treated as "not yet expired".
+    _set_step_up_at(client, sid, utcnow() + timedelta(seconds=3600))
+    aid = _pending_approval(client, "DANGEROUS")
+    r = client.post(f"/api/approvals/{aid}/decision", headers=admin, json={"granted": True})
+    assert r.status_code == 401
+    assert client.get(f"/api/approvals/{aid}", headers=admin).json()["status"] == "PENDING"
+
+
+def test_unknown_risk_cannot_be_granted(client, admin):
+    """A stored risk outside the known enum fails closed (denied + audited), never waved through."""
+    container = client.app.state.container
+
+    async def make():
+        a = await container.approvals.create("vision", "mystery op", "WEIRD", {"cmd": "x"})
+        return a.id
+    aid = _run(make())
+    r = client.post(f"/api/approvals/{aid}/decision", headers=admin, json={"granted": True})
+    assert r.status_code == 403
+    assert client.get(f"/api/approvals/{aid}", headers=admin).json()["status"] == "PENDING"
+    assert "approval_step_up_denied" in client.get("/api/audit", headers=admin).text
+
+
+def test_disable_with_password_only_is_refused_401(client, admin):
+    """Password alone (no code) must be denied with 401 -- not a 422 validation bounce, and
+    never a success."""
+    enroll_mfa(client, admin)
+    r = client.post("/api/auth/mfa/disable", headers=admin,
+                    json={"current_password": ADMIN_PASSWORD})
+    assert r.status_code == 401
+    assert client.get("/api/auth/mfa/status", headers=admin).json()["enabled"] is True
+
+
+def test_mfa_login_failures_are_non_enumerating(client, admin):
+    """An expired/invalid challenge and a valid challenge with a wrong code return the SAME
+    401 body, so an attacker cannot tell which failed."""
+    secret, _ = enroll_mfa(client, admin)
+    challenge = client.post("/api/auth/login",
+                            json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}).json()
+    bad_code = "000000" if _code(secret) != "000000" else "111111"
+    # Valid challenge + wrong code.
+    wrong_code = client.post("/api/auth/mfa/login",
+                             json={"mfa_token": challenge["mfa_token"], "code": bad_code})
+    # A structurally valid but wrong-typ token (an access token) stands in for an
+    # expired/invalid challenge: it must fail with the SAME 401 body, not a distinguishable one.
+    access = admin["Authorization"].split(" ", 1)[1]
+    bad_challenge = client.post("/api/auth/mfa/login",
+                                json={"mfa_token": access, "code": bad_code})
+    assert wrong_code.status_code == 401 and bad_challenge.status_code == 401
+    assert wrong_code.json() == bad_challenge.json()
+
+
+def test_cannot_re_enroll_while_mfa_enabled(client, admin):
+    """A live session alone cannot clear an active factor by starting a new enrollment
+    (which would otherwise drop the account to the non-MFA high-risk path)."""
+    enroll_mfa(client, admin)
+    r = client.post("/api/auth/mfa/enroll", headers=admin)
+    assert r.status_code == 409
+    assert client.get("/api/auth/mfa/status", headers=admin).json()["enabled"] is True
+    # And the high-risk gate still bites: the account is still MFA, so a grant needs step-up.
+    aid = _pending_approval(client, "DANGEROUS")
+    assert client.post(f"/api/approvals/{aid}/decision", headers=admin,
+                       json={"granted": True}).status_code == 401
+
+
+def test_recovery_code_consumed_exactly_once(client, admin):
+    """A recovery hash is removed exactly once: a repeat consume of the same value fails and
+    the stored list shrinks by exactly one. (In-process the app serializes requests through
+    the event loop and SQLite's single writer; on a concurrent backend the FOR UPDATE row
+    lock serializes the read-modify-write.)"""
+    from jarvis_backend.auth.passwords import verify_hash
+    _, codes = enroll_mfa(client, admin)
+    code = codes[0]
+    container = client.app.state.container
+
+    async def consume_twice():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        hashes = (await container.auth.users.by_id(user.id)).mfa_recovery_hashes
+        before = len(hashes)
+        target = None
+        for h in hashes:
+            if await verify_hash(h, code):
+                target = h
+                break
+        assert target is not None
+        first = await container.auth.users.consume_recovery_hash(user.id, target)
+        second = await container.auth.users.consume_recovery_hash(user.id, target)
+        after = len((await container.auth.users.by_id(user.id)).mfa_recovery_hashes)
+        return first, second, before, after
+
+    first, second, before, after = _run(consume_twice())
+    assert first is True and second is False  # single-use
+    assert after == before - 1  # exactly one removed
+
+
+def test_totp_counter_advance_rejects_stale_previous(client, admin):
+    """Compare-and-set: an advance whose ``previous`` no longer matches the stored counter
+    loses, so a replayed step cannot re-advance after the counter already moved on."""
+    from jarvis_backend.auth import totp
+    enroll_mfa(client, admin)
+    container = client.app.state.container
+
+    async def race():
+        user = await container.auth.users.by_username(ADMIN_USER)
+        counter = totp.current_counter()
+        start = user.mfa_last_counter
+        first = await container.auth.users.advance_mfa_counter(user.id, counter, start)
+        # A second caller that read the SAME old ``start`` now loses the compare-and-set.
+        second = await container.auth.users.advance_mfa_counter(user.id, counter, start)
+        return first, second
+
+    first, second = _run(race())
+    assert first is True and second is False

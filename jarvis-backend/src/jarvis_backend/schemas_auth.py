@@ -58,7 +58,10 @@ class MfaEnableOut(BaseModel):
 
 class MfaDisableIn(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
-    code: str = _CODE
+    # Optional at the schema layer so a password-only attempt is DENIED by the service
+    # (fail closed, 401) rather than bounced as a 422 validation error -- disable must
+    # never succeed on the password alone, and the matrix asserts a 401 for that case.
+    code: Optional[str] = Field(default=None, max_length=14, pattern=r"^[0-9A-Za-z\-]{6,14}$")
 
 
 class MfaLoginIn(BaseModel):

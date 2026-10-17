@@ -184,5 +184,42 @@ recovery code once; TOTP replay; rate-limited MFA step; disable needs password+c
 needs step-up [inline or endpoint], SAFE needs none; non-MFA admin allowed; require-mfa blocks;
 separation of duties agent 403; no secret/recovery code in audit).
 
+## Verification note (second iteration — review findings fixed)
+
+All six findings from `.agents/tasks/mfa-review.json` / `mfa-review.md` are addressed:
+
+1. **MFA re-enrollment bypass** — `AuthService.start_mfa_enrollment` now raises 409 while
+   `mfa_enabled` is True, so a live/stolen session cannot clear an active factor and fall
+   back to the non-MFA high-risk path. Rotation requires `disable_mfa` first (password + a
+   current code), which keeps the old factor live. Test: `test_cannot_re_enroll_while_mfa_enabled`.
+2. **Non-atomic one-time state** — `UserStore.advance_mfa_counter` is a compare-and-set
+   (`WHERE mfa_last_counter == previous`, new counter stored only if the UPDATE hits one
+   row); `consume_recovery_hash` keys on the matched HASH under a `SELECT … FOR UPDATE` row
+   lock and removes by value; `enable_mfa` is conditional on the still-pending state and
+   returns False to the loser so concurrent confirms cannot each reveal a distinct recovery
+   set. Tests: `test_recovery_code_consumed_exactly_once`, `test_totp_counter_advance_rejects_stale_previous`.
+3. **Unknown approval risk fails open** — `_enforce_high_risk_step_up` validates `pending.risk`
+   against the complete `RiskLevel` enum FIRST and denies+audits (`reason=unknown_risk`) any
+   value outside it. Test: `test_unknown_risk_cannot_be_granted`.
+4. **Future step-up timestamp** — `ensure_step_up` now requires `0 <= age <= window`, so a
+   future-dated `step_up_at` fails closed. Tests: `test_future_dated_step_up_is_refused`,
+   `test_stale_step_up_is_refused_but_fresh_within_window_succeeds`.
+5. **Verification matrix / API alignment** — `MfaDisableIn.code` is Optional so a
+   password-only disable is DENIED with 401 by the service (not a 422 bounce);
+   `complete_mfa_login` returns ONE non-enumerating 401 body for an expired/invalid
+   challenge, a bad account, and a wrong code. Tests: `test_disable_with_password_only_is_refused_401`,
+   `test_mfa_login_failures_are_non_enumerating`, plus the stale/expired step-up cases above.
+6. **Unmasked MFA-disable password** — `web/js/views/system.js` disable flow replaced the
+   `window.prompt()` with a CSP-compliant inline form using `<input type="password"
+   autocomplete="current-password">` and a separate bounded code input (built via `el()`,
+   no innerHTML / inline script / CDN).
+
+Commands run (env `JARVIS_ENV=dev`, `.\.venv\Scripts\python.exe`):
+- `pytest tests/integration/test_mfa.py -q` → 23 passed.
+- `pytest tests/unit tests/integration -q` → **297 passed, 5 skipped** (5 = expected
+  postgres skips; prior 289 + 8 new/retargeted finding tests). 1 pre-existing unrelated
+  deprecation warning.
+- App factory builds with no MFA configured (`step_up_window=300`, `require_mfa=False`).
+
 ## Reviewer gate contract (unchanged by this plan)
 The implement-and-review loop's reviewer writes `c:\Users\Lenovo\Desktop\JARVIS\abduls_jarvis\.agents\tasks\mfa-review.json` with `verdict` = `APPROVED` as the loop's last child when all items above are satisfied and the full suite is green.
