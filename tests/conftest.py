@@ -16,6 +16,26 @@ ADMIN_USER, ADMIN_PASSWORD = "owner", "correct horse battery staple"
 JWT_SECRET = "test-signing-key-" + "x7Kq9" * 8
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_from_local_env_file():
+    """Stop every test from reading a developer's real, git-ignored .env.
+
+    Settings() declares env_file=".env", so a Settings(env="dev", ...) built in a test would
+    silently inherit whatever the developer has configured locally (e.g. JARVIS_SEARCH_PROVIDER
+    or JARVIS_LLM_* turned on). That made tests asserting CODE DEFAULTS ("...defaults_to_disabled")
+    fail on a machine that has those features enabled -- a test-isolation bug, not a code bug.
+    Neutralise the default env_file for the whole test session so tests see only the values they
+    pass explicitly (and real OS env vars), regardless of any local .env.
+    """
+    original = dict(Settings.model_config)
+    Settings.model_config["env_file"] = None
+    try:
+        yield
+    finally:
+        Settings.model_config.clear()
+        Settings.model_config.update(original)
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
