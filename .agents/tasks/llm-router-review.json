@@ -1,0 +1,96 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "id": 1,
+      "title": "Earliest-id reply parsing misroutes",
+      "severity": "high",
+      "blocking": true,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::_parse_agent",
+      "detail": "_parse_agent keeps the roster id with the smallest offset anywhere in the reply, so preambles and negations resolve to the wrong agent and look like a successful parse (no keyword fallback, trace reads 'LLM routed to X.'). Reproduced: 'The JARVIS router would send this to VISION' -> JARVIS; 'Not TONY, VISION should analyse it' -> TONY. JARVIS is the likely accidental winner because the system prompt names the JARVIS assistant and JARVIS is also a valid answer.",
+      "suggestion": "Prefer the reply's first whitespace token when it is a known id (or scan only the first line) before falling back to a free-text scan. Taking the last match instead only inverts the failure."
+    },
+    {
+      "id": 2,
+      "title": "Blank utterance still costs a model call",
+      "severity": "medium",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::LLMRouter.route",
+      "detail": "AssistRequest.utterance has no min_length and strip_wake_word('Hey JARVIS') returns ''. The router then prompts the provider with an empty 'Request:' and routes whatever it names with task=''. Reproduced: empty utterance -> VISION with task ''. The keyword router answered as JARVIS deterministically. Blank STT results are a real voice-path input.",
+      "suggestion": "Short-circuit to the keyword fallback when the wake-word-stripped text is empty."
+    },
+    {
+      "id": 3,
+      "title": "Provider outages fall back silently",
+      "severity": "medium",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::LLMRouter.route; core/llm.py::OpenAICompatibleLLM.complete",
+      "detail": "The shipped provider never raises: it logs and returns the honest fallback sentence, which contains no agent id, so a real outage takes the '_parse_agent is None' path. That path emits no log line, and log.warning('llm routing failed') never fires for the shipped provider, so the recorded reason is 'language model gave no usable agent' instead of 'unavailable' and there is no router log of a down model. The never-raise discipline and error-class-only logging themselves are correct; the utterance is never logged.",
+      "suggestion": "Log a warning on the unparsable-reply path too, and/or distinguish the provider's fallback sentence from a genuinely unusable reply."
+    },
+    {
+      "id": 4,
+      "title": "Data-boundary docs not updated for router egress",
+      "severity": "medium",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "docs/PROVIDERS.md 'What leaves the machine (data boundary)'",
+      "detail": "That section bounds egress field by field to what LLMAgent sends. With router=llm the raw utterance of every non-explicit request is sent to the provider before an agent is chosen, including requests handled by LLM-free agents (FridayAgent, TonyAgent, NatashaAgent, WongAgent, JarvisAgent). 'Remember that ...' facts are Fernet-encrypted at rest yet their utterance now crosses the wire for routing. No new transport gap: router calls reuse the complete() that refuses plaintext http:// to non-loopback hosts, and the llm_plaintext_remote config finding still applies.",
+      "suggestion": "Extend the data-boundary section to cover the routing call."
+    },
+    {
+      "id": 5,
+      "title": "Router inherits the 30s agent timeout and 512-token cap",
+      "severity": "medium",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::LLMRouter",
+      "detail": "The routing round trip is serialized ahead of the agent's own call, so a reasoning agent now makes two sequential model calls before the first spoken word, and a stalled provider can burn llm_timeout_seconds (default 30) before keyword routing even starts.",
+      "suggestion": "Give routing its own short timeout and a small max_tokens."
+    },
+    {
+      "id": 6,
+      "title": "Menu truncation hides live keywords",
+      "severity": "low",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::_MENU_KEYWORDS",
+      "detail": "The menu caps keywords at 6 per agent. NATASHA ships 7, so 'meeting' never reaches the model even though KeywordRouter still matches it; the two layers disagree about that agent's lane and the gap grows silently as agents gain keywords.",
+      "suggestion": "Raise the cap or derive it from the roster."
+    },
+    {
+      "id": 7,
+      "title": "No hand-off announcement on LLM routes",
+      "severity": "low",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/supervisor.py::_delegation_note",
+      "detail": "_delegation_note returns None unless decision.explicit, and LLM routes set explicit=False. The rule predates this change, but this change makes non-explicit specialist routing the common case, so a typical successful route answers in a specialist's voice with no 'VISION will handle that.'",
+      "suggestion": "Decide whether non-explicit specialist routes should announce the hand-off."
+    },
+    {
+      "id": 8,
+      "title": "Default-install trace is noisy",
+      "severity": "low",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "jarvis-backend/src/jarvis_backend/core/router.py::LLMRouter._fallback",
+      "detail": "With the default EchoLLM every request's user-visible PLAN reason now ends with '(keyword fallback: no language model configured)'.",
+      "suggestion": "Consider suppressing the suffix for the EchoLLM short-circuit."
+    },
+    {
+      "id": 9,
+      "title": "Test-count evidence does not reconcile",
+      "severity": "low",
+      "blocking": false,
+      "confidence": "confirmed",
+      "location": "commit d4939a0 message; tests/unit/test_router.py",
+      "detail": "The commit attributes 16 new tests to this file (326 baseline + 16 = 342). The file has 12 functions and collects 14 items; a narrow spot-check of just that file reported '14 passed in 0.08s'. The five required LLMRouter cases are all present and pass.",
+      "suggestion": "Correct the arithmetic in the recorded verification."
+    }
+  ],
+  "reviewDoc": "c:\\Users\\Lenovo\\Desktop\\JARVIS\\abduls_jarvis/.agents/tasks/llm-router-review.md"
+}

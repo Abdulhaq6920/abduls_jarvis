@@ -61,6 +61,8 @@ dev = [
     "httptools==0.8.0",
     "httpx==0.28.1",
     "idna==3.20",
+    "node>=2.0.0",
+    "npm>=0.1.1",
     "pillow>=10.0",
     "prometheus-client==0.26.0",
     "psutil==7.2.2",
